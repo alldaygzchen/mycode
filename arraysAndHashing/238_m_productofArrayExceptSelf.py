@@ -2,7 +2,6 @@ class Solution:
     def productExceptSelf(self, nums):
 
         res = [1 for _ in nums]
-        print('res',res)
         accu_left_mul =1
         accu_right_mul =1 
 

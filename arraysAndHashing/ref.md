@@ -8,7 +8,12 @@
 - List
     - https://sean22492249.medium.com/python-list-%E7%9A%84-extend-append-%E7%9A%84%E5%B7%AE%E5%88%A5-5dd4a585aafe
 
+- loop
+    - priority: continue,return, ordinary 
 
+- while
+    - if statement satisfies for first round can be considered
+    - not in order such as for loop e.g. leetcode 271
 
 - Good Reference
     - https://ithelp.ithome.com.tw/users/20107274/ironman/1578
