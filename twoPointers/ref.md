@@ -1,0 +1,3 @@
+- two pointer l,r has different converge methods according different problems e.g. 125 
+- whether l=r depends on question
+- sorted in number 
