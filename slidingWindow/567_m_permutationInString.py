@@ -40,6 +40,9 @@ class Solution:
 
         while r < len(s2):
 
+            print(l,r)
+            print(s1_map,s2_map)
+
             if s1_map ==s2_map:
                 return True
 
