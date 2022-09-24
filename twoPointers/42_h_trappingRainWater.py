@@ -38,19 +38,17 @@ s.trap([4,2,0,3,2,5])
 
 #         left_max =height[l-1]
 #         right_max = height[r+1]
-#         while l<r:
+#         while l<=r:
 
 #             if left_max<=right_max:
 #                 left_max = max(left_max ,height[l])
-#                 print('left_max',left_max)
-#                 print('height[l]',height[l])
+
 #                 res+=left_max-height[l]
 #                 l+=1
 
 #             else:
 #                 right_max = max(height[r],right_max)
-#                 print('right_max ',right_max )
-#                 print('height[r]',height[r])
+
 #                 res+=right_max-height[r]
 #                 r-=1
 

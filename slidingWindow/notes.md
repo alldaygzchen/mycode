@@ -1,0 +1,1 @@
+Control the two pointer and record all it solution
