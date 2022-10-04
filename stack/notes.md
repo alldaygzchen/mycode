@@ -8,7 +8,7 @@ e.g 739  [73,74,75,71,69,72,76,73]  = > 73(x),74(x),75,71(x),69(x),72,76 若不�
 
 hw: 
 739 vs 853  montonic decerasing order done
-try 853 using montonic decreasing
+try 853 using montonic decreasing done
 try 239 using pqir index and value
-compare 853 vs 739 append
+compare 853 vs 739 append done
 
