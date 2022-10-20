@@ -1,4 +1,4 @@
-#consider value as duplicate
+#consider value as pointer
 
 class Solution:
     def findDuplicate(self, nums) -> int:
