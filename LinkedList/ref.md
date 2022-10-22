@@ -15,3 +15,17 @@ while n: #n=3:
      3 2 1 right  
      A B C D      *E* F G None  
   1  2 3 4 left1  
+
+
+
+
+
+while 
+
+n=3 
+
+while n>3:
+
+    1  2  3
+ n= 1  2  3  4
+      p  p  p 
