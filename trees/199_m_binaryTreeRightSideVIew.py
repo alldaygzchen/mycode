@@ -26,8 +26,8 @@ class Solution:
                     rightNode = node
                     q.append(node.left)
                     q.append(node.right)
-
-            res.append(rightNode.val)
+            if rightNode:
+                res.append(rightNode.val)
 
         return res
 

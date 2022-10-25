@@ -187,3 +187,7 @@ print(s.res)
 a=s.test()
 print(a)
 print(s.res)
+
+
+
+print(None<4)
