@@ -191,3 +191,5 @@ print(s.res)
 
 
 print(None<4)
+a=[1,2]
+print(a[:0])
