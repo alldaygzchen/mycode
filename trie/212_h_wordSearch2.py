@@ -57,7 +57,7 @@ class Solution:
         if node.isWord:
             self.res.add(word)
             node.isWord = False
-            self.root.removeWord(word)
+            self.root.removeWord(word) #prevent same word  it removes all characters of the input word from the prefix tree that are not used to store other words.
 
 
         self.helper(r + 1, c, node, word) # not postorder
