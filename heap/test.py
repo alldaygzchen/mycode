@@ -11,8 +11,17 @@ print(minHeap)
 
 H = [21,1,45,78,3,5]
 # Covert to a heap
-heapq.heapify(H)
+# heapq.heapify(H)
+# print(H)
+# # Add element
+# heapq.heappush(H,8)
+# print(H)
+
+
+heapq.heappop(H)
 print(H)
-# Add element
-heapq.heappush(H,8)
+
+
+heapq.heapify(H)
+heapq.heappop(H)
 print(H)

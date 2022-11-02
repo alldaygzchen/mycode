@@ -9,7 +9,7 @@ class KthLargest:
         self.k = k
 
         heapq.heapify(self.minHeap) # turn to a heap
-        while len(self.minHeap)>k: #to be length=k-1
+        while len(self.minHeap)>k: #to be length=k
             heapq.heappop(self.minHeap) #remain heap
         
 
