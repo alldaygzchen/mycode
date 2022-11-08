@@ -1,1 +1,8 @@
 good!! e.g.46
+
+recursion from the bottom and using for loop
+e.g. 46
+
+recursion from top:
+e.g. 39 (left: allow same index, right: not same index)
+e.g. 90 (left: at least one same value, right: different values)
