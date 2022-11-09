@@ -6,3 +6,11 @@ e.g. 46
 recursion from top:
 e.g. 39 (left: allow same index, right: not same index)
 e.g. 90 (left: at least one same value, right: different values)
+
+e.g. 131 good
+
+
+Not done 
+defaultdicts
+Counter
+Map

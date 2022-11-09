@@ -10,3 +10,9 @@ class Solution:
 
 s =Solution()
 s.printtest()
+
+from collections import Counter
+from collections import defaultdict
+board = [["A","B","C","E"],["S","F","C","S"],["A","D","E","E"]]
+count = defaultdict(int, sum(map(Counter, board), Counter()))
+print(count)
