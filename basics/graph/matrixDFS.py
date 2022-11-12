@@ -1,3 +1,4 @@
+# 0 is Free & 1 is Block
 class Solution:
     def matrix(self,grid):
         self.grid = grid 

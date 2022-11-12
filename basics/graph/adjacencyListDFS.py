@@ -12,6 +12,37 @@ from collections import deque
 #F   G 
 
 #count path
+# class Solution:
+
+#     def __init__(self,edges):
+
+#         self.adjList = {}
+#         for src, dst in edges:
+#             if src not in self.adjList:
+#                 self.adjList[src] = []
+#             if dst not in self.adjList:
+#                 self.adjList[dst] = []
+#             self.adjList[src].append(dst)
+
+
+#     def dfs(self,node,target,visit):
+#         if node in visit:
+#             return  0
+#         if node ==target:
+#             return 1
+#         count = 0
+#         visit.add(node)
+        
+#         for neighbor in  self.adjList[node]:
+#             count+=self.dfs(neighbor,target,visit)
+#         visit.remove(node) #e.g. remove B
+
+#         return count
+# edges = [["A", "B"], ["B", "C"], ["B", "E"], ["C", "E"], ["E", "D"]]
+# s = Solution(edges)
+# print(s.dfs("A","E",set()))
+
+
 class Solution:
 
     def __init__(self,edges):
@@ -25,22 +56,91 @@ class Solution:
             self.adjList[src].append(dst)
 
 
-    def dfs(self,node,target,visit):
+    def countPath(self,node,target):
+
+        self.target = target
+        self.count = 0
+        self.dfs("A",set(),[])
+
+        return self.count
+
+
+    def dfs(self,node,visit,path):
+
+
         if node in visit:
-            return  0
-        if node ==target:
-            return 1
-        count = 0
+            return
+
+        path.append(node)
+        
+        if node ==self.target:
+            self.count+=1
+            # print('##',self.record)
+            return
+
         visit.add(node)
+
         
         for neighbor in  self.adjList[node]:
-            count+=self.dfs(neighbor,target,visit)
+            self.dfs(neighbor,visit,path[:])
         visit.remove(node) #e.g. remove B
+        path.pop()
 
-        return count
+
+
+
 edges = [["A", "B"], ["B", "C"], ["B", "E"], ["C", "E"], ["E", "D"]]
 s = Solution(edges)
-print(s.dfs("A","E",set()))
+print(s.countPath("A","E"))
 
         
+# class Solution:
+
+#     def __init__(self,edges):
+
+#         self.adjList = {}
+#         for src, dst in edges:
+#             if src not in self.adjList:
+#                 self.adjList[src] = []
+#             if dst not in self.adjList:
+#                 self.adjList[dst] = []
+#             self.adjList[src].append(dst)
+
+
+#     def recordPath(self,node,target):
+
+#         self.target = target
+#         self.record = []
+#         self.dfs("A",set(),[])
+
+#         return self.record
+
+
+#     def dfs(self,node,visit,path):
+
+
+#         if node in visit:
+#             return
+
+#         path.append(node)
+        
+#         if node ==self.target:
+#             self.record.append(path)
+#             # print('##',self.record)
+#             return
+
+#         visit.add(node)
+
+        
+#         for neighbor in  self.adjList[node]:
+#             self.dfs(neighbor,visit,path[:])
+#         visit.remove(node) #e.g. remove B
+#         path.pop()
+
+
+
+
+# edges = [["A", "B"], ["B", "C"], ["B", "E"], ["C", "E"], ["E", "D"]]
+# s = Solution(edges)
+# print(s.recordPath("A","E"))
 

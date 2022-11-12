@@ -4,6 +4,4 @@
 - 看清楚題目本質
 
 not done:
-- recursion 
-- review
-- notes for data structure
+- when to use postorder and inorder
