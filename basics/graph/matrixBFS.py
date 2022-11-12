@@ -28,7 +28,7 @@ class Solution:
                     if (r+dr<0 or c+dc<0 or r+dr == rows or c+dc ==cols or (r+dr,c+dc) in visit or grid[r+dr][c+dc]==1):#visited or added
                         continue
                     quene.append((r+dr,c+dc))
-                    visit.add((r+dr,c+dc))
+                    visit.add((r+dr,c+dc))#added
 
             length +=1
 

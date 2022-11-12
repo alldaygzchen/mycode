@@ -1,5 +1,5 @@
 from collections import deque
-
+# count path
 # GraphNode used for adjacency list (Another way to represent)
 # class GraphNode:
 #     def __init__(self, val):
