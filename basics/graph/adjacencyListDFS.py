@@ -11,7 +11,7 @@ from collections import deque
 #  B  C  D  E
 #F   G 
 
-#count path
+#count path (postorder)
 # class Solution:
 
 #     def __init__(self,edges):
@@ -30,7 +30,7 @@ from collections import deque
 #             return  0
 #         if node ==target:
 #             return 1
-#         count = 0
+#         count = 0 # the key point
 #         visit.add(node)
         
 #         for neighbor in  self.adjList[node]:
@@ -43,7 +43,7 @@ from collections import deque
 # print(s.dfs("A","E",set()))
 
 
-class Solution:
+class Solution:#(preorder)
 
     def __init__(self,edges):
 

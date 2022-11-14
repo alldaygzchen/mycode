@@ -1,4 +1,5 @@
-#union find: find whether has a path already in the graph
+# union find: find whether has a path already in the graph
+# minimumSpanningTree
 
 import heapq
 

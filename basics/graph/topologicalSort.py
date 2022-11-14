@@ -1,6 +1,7 @@
 # only work for directed, acyclical graph 
 # first way: change graph order
 # second way: postorder
+# topological order
 
 
 class Solution:

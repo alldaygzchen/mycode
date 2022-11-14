@@ -1,4 +1,5 @@
 # compare to dijkstras
+# minimumSpanningTree
 
 import heapq
 def minimumSpanningTree(edges,n):
