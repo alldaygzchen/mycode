@@ -1,30 +1,27 @@
 class Solution:
-    def numIslands(self, grid) -> int:
-        if not grid or not grid[0]:
-            return 0
+    def numIslands(self, grid):
 
-        rows, cols = len(grid), len(grid[0])
-        visit = set()
-        islands = 0
+        self.grid = grid 
+        self.visit = set()
+        self.rows = len(grid)
+        self.cols = len(grid[0])
+        self.result = 0
+        
+        for r in range(self.rows):
+            for c in range(self.cols):
 
-        def dfs(r, c):
-            
-            if (
-                r not in range(rows)
-                or c not in range(cols)
-                or grid[r][c] == "0"
-                or (r, c) in visit
-            ):
-                return
+                if self.grid[r][c] == "1" and (r,c) not in self.visit:
+                    self.result+=1
+                    self.dfs(r,c)
 
-            visit.add((r, c))
-            directions = [[0, 1], [0, -1], [1, 0], [-1, 0]]
-            for dr, dc in directions:
-                dfs(r + dr, c + dc)
+        return self.result
 
-        for r in range(rows):
-            for c in range(cols):
-                if grid[r][c] == "1" and (r, c) not in visit:
-                    islands += 1
-                    dfs(r, c)
-        return islands
+    def dfs(self,r,c): # self.visit
+        if (r not in range(self.rows) or c not in range(self.cols) or self.grid[r][c]=="0" or (r,c) in self.visit):
+            return 
+
+        self.visit.add((r,c))
+        directions = [[0, 1], [0, -1], [1, 0], [-1, 0]]
+        for dr,dc in directions:
+            self.dfs(r+dr,c+dc)
+

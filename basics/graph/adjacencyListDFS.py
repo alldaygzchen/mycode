@@ -11,7 +11,7 @@ from collections import deque
 #  B  C  D  E
 #F   G 
 
-#count path (postorder)
+#count number of path (postorder)
 # class Solution:
 
 #     def __init__(self,edges):
@@ -42,7 +42,7 @@ from collections import deque
 # s = Solution(edges)
 # print(s.dfs("A","E",set()))
 
-
+#count number of path 
 class Solution:#(preorder)
 
     def __init__(self,edges):
@@ -60,18 +60,18 @@ class Solution:#(preorder)
 
         self.target = target
         self.count = 0
-        self.dfs("A",set(),[])
+        self.dfs("A",set())
 
         return self.count
 
 
-    def dfs(self,node,visit,path):
+    def dfs(self,node,visit):
 
 
         if node in visit:
             return
 
-        path.append(node)
+
         
         if node ==self.target:
             self.count+=1
@@ -82,9 +82,9 @@ class Solution:#(preorder)
 
         
         for neighbor in  self.adjList[node]:
-            self.dfs(neighbor,visit,path[:])
+            self.dfs(neighbor,visit)
         visit.remove(node) #e.g. remove B
-        path.pop()
+
 
 
 

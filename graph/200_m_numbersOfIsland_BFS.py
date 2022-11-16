@@ -1,34 +1,33 @@
 from collections import deque
-class SolutionBFS:
+class Solution:
     def numIslands(self, grid) -> int:
-        if not grid:
-            return 0
+        self.grid = grid 
+        self.visit = set()
+        self.rows = len(grid)
+        self.cols = len(grid[0])
+        self.result = 0 
 
-        rows, cols = len(grid), len(grid[0])
-        visited=set()
-        islands=0
+        for r in range(self.rows):
+            for c in range(self.cols):
 
-        def bfs(r,c):
-             q = deque()
-             visited.add((r,c))
-             q.append((r,c))
-           
-             while q:
-                 row,col = q.popleft()
-                 directions= [[1,0],[-1,0],[0,1],[0,-1]]
-               
-                 for dr,dc in directions:
-                     r,c = row + dr, col + dc
-                     if (r) in range(rows) and (c) in range(cols) and grid[r][c] == '1' and (r ,c) not in visited:
-                       
-                         q.append((r , c ))
-                         visited.add((r, c ))
+                if self.grid[r][c] == "1" and (r,c) not in self.visit:
+                    self.result+=1
+                    self.bfs(r,c)
 
-        for r in range(rows):
-            for c in range(cols):
-            
-                if grid[r][c] == "1" and (r,c) not in visited:
-                    bfs(r,c)
-                    islands +=1 
+        return self.result
 
-        return islands
+    def bfs(self,r,c): # self.visit
+        
+        q = deque()
+        self.visit.add((r,c))
+        q.append((r,c))
+
+        while q:
+            row,col = q.popleft()
+            directions = [[0, 1], [0, -1], [1, 0], [-1, 0]]
+            for dr,dc in directions:
+                r,c = row+dr,col+dc
+                if (r in range(self.rows) and  c in range(self.cols) and self.grid[r][c]=="1" and (r,c) not in self.visit):
+                    q.append((r,c))
+                    self.visit.add((r,c))
+

@@ -75,7 +75,7 @@ class Solution:
                     if neighbor not in visit:
                         new_path=path[:]
                         new_path.append(neighbor)
-
+                        visit.add(neighbor)
                         quene.append(new_path)
 
         return []

@@ -18,10 +18,10 @@ class Solution:
             return 
 
         visit.add((r,c))
-        self.helper(r+1,c,visit)
-        self.helper(r-1,c,visit)
-        self.helper(r,c+1,visit)
-        self.helper(r,c-1,visit)
+        self.helper(r+1,c,visit) # prevent visit a
+        self.helper(r-1,c,visit) # prevent visit b
+        self.helper(r,c+1,visit) # prevent visit c
+        self.helper(r,c-1,visit) # prevent visit d
         visit.remove((r,c))
 
 s = Solution()
