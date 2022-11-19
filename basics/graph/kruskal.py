@@ -43,7 +43,7 @@ def minimumSpanningTree(edges,n):
     unionFind = UnionFind(n)
     while len(mst)<n-1:
         weight,n1,n2 = heapq.heappop(minHeap)
-        if not unionFind.union(n1,n2):
+        if not unionFind.union(n1,n2):#duplicate path
             continue
         mst.append([n1,n2])
 

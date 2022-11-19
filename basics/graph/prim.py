@@ -1,5 +1,6 @@
 # compare to dijkstras
-# minimumSpanningTree
+# minimumSpanningTree: let the weight of tree be minimize cost
+# may have multiple solutions
 
 import heapq
 def minimumSpanningTree(edges,n):

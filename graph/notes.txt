@@ -1,0 +1,11 @@
+Recursion is kind of a while loop:  
+e.g. dijkstras vd surrounded Regions  
+
+
+Great example in adjacencyList.py
+- when to pop => tracking current path not for global variables
+
+leetcode 684, 207,261 => return boolean but also change self.variable
+
+leetoce 323 not tested
+
