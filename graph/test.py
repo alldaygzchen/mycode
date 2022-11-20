@@ -22,3 +22,11 @@ test(a)
 test(a)
 test(a)
 print(a) #[1, 1, 1, 1]
+
+# test4
+test ='abc'
+print(test[:0])
+set('abc')
+set(['abc'])
+set(['a','b','c'])
+[1,2,3][:]
