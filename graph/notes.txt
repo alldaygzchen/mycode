@@ -9,3 +9,5 @@ leetcode 684, 207,261 => return boolean but also change self.variable
 
 leetoce 323 not tested
 
+leetcode 778 practice nice
+

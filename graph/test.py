@@ -30,3 +30,8 @@ set('abc')
 set(['abc'])
 set(['a','b','c'])
 [1,2,3][:]
+
+
+
+a=set((0,0))
+print(a)
