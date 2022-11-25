@@ -1,44 +1,44 @@
 from collections import defaultdict
-#not done
-
 class Solution:
-    def alienOrder(self, words):
+    def alien_order(self, words):
         
-        #prevent duplicate
-        self.visited =set()
 
-        #self.record
-        self.record =[]
+        #self.output
+        self.output =[]
+        self.visited =set()
+        self.record = []
 
 
         # construct our adjSet
-        self.adjSet = defaultdict(set)
+        self.adjSet = {char: set() for word in words for char in word}
         for i in range(len(words)-1):
             firstWord = words[i]
-            secondWord = words[i]
+            secondWord = words[i+1]
 
-            minLength = min(len(firstWord),len(secondWord ))
+            minLength = min(len(firstWord),len(secondWord))
 
             if len(firstWord)>len(secondWord) and firstWord[:minLength] == secondWord[:minLength]:
                 return ""
-            else:
-                for j in len(minLength):
-                    if firstWord[j]!=secondWord[j]:
-                        self.adjSet[firstWord[j]].add(secondWord[j])
-                        break
+            
+            for j in range(minLength):
+                if firstWord[j]!=secondWord[j]:
+                    self.adjSet[firstWord[j]].add(secondWord[j])
+                    break
 
         # run all nodes
-        for char in self.adjSet:
+        for char in sorted(self.adjSet.keys(),reverse=True):
             if not self.dfs_postorder(char):
-                return False
+                return ""
 
-        self.res.reverse()
-        return "".join(self.res.reverse())
+        self.output.reverse()
+        return "".join(self.output)
 
     def dfs_postorder(self,char):
         # base case
-        if char in self.visit:
+        if char in self.visited:
             return False
+        if char in self.record:
+            return True
         
         self.visited.add(char)
 
@@ -46,10 +46,8 @@ class Solution:
             if not self.dfs_postorder(next):
                 return False
 
+        self.output.append(char)
         self.record.append(char)
         self.visited.remove(char)
         return True
 
-        
-
-        
