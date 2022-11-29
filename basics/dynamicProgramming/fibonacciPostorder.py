@@ -9,7 +9,7 @@ class Solution:
             return cache[n]
 
         #record the result n at cache
-        cache[n] = self.fibonacci_postorder_dp(n-1)+self.fibonacci_postorder_dp(n-1)
+        cache[n] = self.fibonacci_postorder_dp(n-1)+self.fibonacci_postorder_dp(n-2)
         return cache[n] 
 
 s =Solution()
