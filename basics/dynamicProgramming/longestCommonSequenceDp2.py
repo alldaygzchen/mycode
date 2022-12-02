@@ -8,17 +8,19 @@ class Solution:
         
         self.N = len(text1)
         self.M = len(text2)
-        self.dp = [[0]*(self.M+1) for _ in range(self.N+1)]
+        prevRow = [0]*(self.M+1)
 
 
         for i in range(self.N):
+            curRow = [0]*(self.M+1)
             for j in range(self.M):
                 if text1[i]==text2[j]:
-                    self.dp[i+1][j+1]=1+self.dp[i][j]
+                    curRow[j+1]=1+prevRow[j]
                 else:
-                    self.dp[i+1][j+1] = max(self.dp[i][j+1],self.dp[i+1][j])
-        print(self.dp)
-        return self.dp[self.N][self.M]
+                    curRow[j+1] = max(prevRow[j+1],curRow[j])
+        
+            prevRow =curRow
+        return prevRow[self.M]
 
 text1 = ['A','D','C','B']   
 text2 = ['A','B','C']       
