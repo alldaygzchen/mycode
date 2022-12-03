@@ -18,8 +18,6 @@ class Solution:
         for i in range(2,len(nums)):
             dp[i] = max(max(dp[0:i-1])+nums[i],dp[i-1])
 
-        print(dp)
-
         return dp[len(nums)-1]
 
 s =Solution()
