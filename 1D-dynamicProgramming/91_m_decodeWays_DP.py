@@ -1,4 +1,9 @@
 class Solution:
+
+    """
+    think about number 12
+    
+    """
     def numDecodings(self, s):
         dp = [-1]* (len(s)+1)
         dp[len(s)] =1
