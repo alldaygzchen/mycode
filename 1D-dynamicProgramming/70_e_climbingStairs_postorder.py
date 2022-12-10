@@ -32,4 +32,4 @@ class Solution:
         return self.dfs_postorder(stair+1)+self.dfs_postorder(stair+2) 
 
 s =Solution()
-print(s.climbStairs(5))
+print(s.climbStairs(3))
