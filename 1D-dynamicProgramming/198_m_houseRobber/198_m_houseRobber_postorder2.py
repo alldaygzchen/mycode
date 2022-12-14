@@ -7,7 +7,7 @@ class Solution:
     def rob(self, nums):
         self.nums = nums
         self.cache = [-1]*(len(nums)) 
-        return self.dfs_postorder(len(nums)-1) # the nth
+        return self.dfs_postorder(len(nums)-1)
         
 
     def dfs_postorder(self,idx):

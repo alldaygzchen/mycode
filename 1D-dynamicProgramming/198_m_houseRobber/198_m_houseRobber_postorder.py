@@ -1,6 +1,7 @@
 class Solution:
     """
     dp = [] #max profit
+    the nth problem
   
     """
 
