@@ -6,56 +6,34 @@ class Solution:
 
     def coinChange(self, coins, amount):
 
-        if amount==0:
-            return 0
+        self.coins = coins
+        self.dp = {0: 0}
+        res = self.dfs_postorder(amount)
+        if res == float('inf'):
+              return -1
+        return res
 
-        dp  = [float('inf')]*(amount)
+
+    def dfs_postorder(self,idx):
         
-        for i in range(amount):
-            if i+1 in coins:
-                dp[i] = 1
-        for a in range(amount):
-            print(a)
-            if dp[a]!=1:
-                for c in coins:
-                    if a+1-c>0:
-                        dp[a] = min(dp[a], 1 + dp[a - c])
+        # base case
 
-        if dp[amount-1] == float('inf'):
-            return -1
+        if idx in self.dp :
+            return self.dp[idx]
+
+
+        res = float('inf')
         
-        return dp[amount-1]
-
-
-
-
-# class Solution:
-
-#     '''dp = min coin to the objective'''
-
-#     def coinChange(self, coins, amount):
-
-#         if amount==0:
-#             return 0
-
-#         amounts = [ i+1 for i in range(amount)]
-#         dp  = [float('inf')]*len(amounts)
         
-#         for idx,a in enumerate(amounts):
-#             if a in coins:
-#                 dp[idx] = 1
-
-
-#         for i in range(len(amounts)):
-#             if dp[i]!=1:
-#                 for c in coins:
-#                     if amounts[i]-c>0:
-#                         dp[i] = min(dp[i], 1 + dp[amounts[i]-c-1])
-
-#         if dp[amount-1] == float('inf'):
-#             return -1
+        #formula
+        for c in self.coins:
+            if idx-c >=0:
+                res = min (res,1+self.dfs_postorder(idx-c))
+        self.dp[idx] = res
         
-#         return dp[amount-1]
+        return self.dp[idx]
+
+
 
 s = Solution()
 print(s.coinChange([1,2,5],11))

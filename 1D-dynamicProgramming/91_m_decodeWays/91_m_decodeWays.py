@@ -1,33 +1,40 @@
+
 class Solution:
-    def numDecodings(self,s):
-        self.s = s
-        self.dp = [-1]* (len(s)+1)
-        res =self.dfs_postorder(0)
-        print(self.dp)
+
+    "dp = min coin to the objective"
+
+    def coinChange(self, coins, amount):
+
+        self.coins = coins
+        self.dp = {0: 0}
+        res = self.dfs_postorder(amount)
+        if res == float('inf'):
+              return -1
         return res
+
 
     def dfs_postorder(self,idx):
         
-        #base case 
-        if idx == len(self.s):
-            print('idx',idx)
-            self.dp[idx]=1
-            return self.dp[idx]
-        if idx>len(self.s):
-            return 0
+        # base case
 
-        if self.dp[idx]!=-1:
+        if idx in self.dp :
             return self.dp[idx]
 
-        if self.s[idx] == "0":
-            return 0
 
+        res = float('inf')
+        
         
         #formula
-        res = self.dfs_postorder(idx+1)
-        if idx+1<len(self.s) and (self.s[idx] == "1" or self.s[idx]=="2" and self.s[idx+1] in "0123456"):
-            res+=self.dfs_postorder(idx+2)
-
+        for c in self.coins:
+            if idx-c >=0:
+                res = min (res,1+self.dfs_postorder(idx-c))
         self.dp[idx] = res
-        return res
         
+        return self.dp[idx]
+
+
+s = Solution()
+print(s.coinChange([1,2,5],11))
+print(s.coinChange([2],3))
+print(s.coinChange([1],0))
+
