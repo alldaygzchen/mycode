@@ -23,4 +23,8 @@ f(10) f(9) f(6)
 
 [Knapsack problem]  
       f(0,8) # max profit under index 0 and capacity 8  
-    f(1,5) f(1,8)    
+    f(1,5) f(1,8)   
+
+[Partition Equal Subset Sum]  
+        f(11,0) # whether it can be partition in sum=11 and index=0
+    f(11,1)  f(10,1)
