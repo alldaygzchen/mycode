@@ -5,3 +5,8 @@ e.g. 97
 f(2,0)  
     f(2,1)  
 f(3,1)  f(2,2)  
+
+
+
+e.g 10
+the problem is like a prune tree, only a statement will be fulfilled
