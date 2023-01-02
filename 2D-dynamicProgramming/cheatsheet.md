@@ -10,3 +10,6 @@ f(3,1)  f(2,2)
 
 e.g 10
 the problem is like a prune tree, only a statement will be fulfilled
+
+
+e.g. string palindrome ,subsequence
