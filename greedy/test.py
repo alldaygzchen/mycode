@@ -1,3 +1,2 @@
-for i in range(3,2):
-    print('n')
-print('y')
+for i in range(3):
+    print(i)
