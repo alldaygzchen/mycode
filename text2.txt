@@ -1,0 +1,887 @@
+```
+router.go
+        materialsController := materialsController.NewMaterialsController()
+        v1.POST("/materials/homework/submission", materialsController.CreateHomework)
+        v1.GET("/materials/homework/result/material/:material_id", materialsController.HomeworkResultByMaterialID)
+```
+
+```
+controller/init.go
+
+package controller
+
+import "github.com/gin-gonic/gin"
+
+
+type MaterialsController interface {
+    CreateHomework(*gin.Context)
+    HomeworkResultByMaterialID(*gin.Context)
+}
+
+
+type materialsController struct{}
+
+
+func NewMaterialsController() MaterialsController {
+    return &materialsController{}
+}
+
+```
+
+```
+controller/materials.go
+
+package controller
+
+
+import (
+    "Pairotto/Pairotto/app"
+    "Pairotto/Pairotto/controller_model"
+    "Pairotto/Pairotto/dao/repository"
+    service "Pairotto/Pairotto/service/materials"
+    "Pairotto/Pairotto/sutil"
+    "errors"
+    "github.com/gin-gonic/gin"
+    "net/http"
+    "scm.tutorabc.com/tgo-framework/go-log"
+)
+
+
+func (c *materialsController) CreateHomework(ctx *gin.Context) {
+    // Implementation for handling Create Homework
+    context := ctx.Request.Context()
+    appG := app.Gin{C: ctx}
+    lb := sutil.NewLogBuild(context, "CreateHomework")
+    defer func() {
+        if lb.IsError() {
+            log.Error(lb)
+            return
+        }
+        log.Info(lb)
+    }()
+
+
+    var req controller_model.MaterialCreateHomeworkReq
+    if err := ctx.ShouldBindJSON(&req); err != nil {
+        appG.ResponseCasual(http.StatusBadRequest, app.ERROR, gin.H{"error": err.Error()})
+        lb.SetError(err)
+        return
+    }
+
+
+    // 先查詢資料庫判斷 material 是否存在
+    existMaterials, notExistMaterials, err := service.CheckMaterialsExist(req.MaterialIDs)
+    if err != nil {
+        lb.SetError(err)
+        appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+        return
+    }
+    // taskID
+    taskID := sutil.NewUUID()
+
+
+    // 不存在的 material 放進 AddCreateHomeworkTask
+    if len(notExistMaterials) > 0 {
+        err := service.AddCreateHomeworkTask(notExistMaterials, req.CreateTxt, taskID)
+        if err != nil {
+            lb.SetError(err)
+            appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+            return
+        }
+    }
+
+
+    // 回傳 resp，標示哪些已存在、哪些新建
+    resp := controller_model.MaterialCreateHomeworkResp{
+        ProcessingMaterials:     notExistMaterials,
+        AlreadyExistedMaterials: existMaterials,
+        State: func() repository.TestState {
+            if len(notExistMaterials) == 0 {
+                return repository.TestStateCompleted
+            }
+            return repository.TestStateInProgress
+        }(),
+        TaskID: taskID,
+    }
+
+
+    appG.ResponseCasual(http.StatusOK, app.SUCCESS, resp)
+}
+
+
+func (c *materialsController) HomeworkResultByMaterialID(ctx *gin.Context) {
+    // Implementation for handling HW results by material ID
+    context := ctx.Request.Context()
+    appG := app.Gin{C: ctx}
+    lb := sutil.NewLogBuild(context, "HomeworkResult")
+    defer func() {
+        if lb.IsError() {
+            log.Error(lb)
+            return
+        }
+        log.Info(lb)
+    }()
+
+
+    materialId := ctx.Param("material_id")
+    if materialId == "" {
+        err := errors.New("material_id is required")
+        appG.ResponseErrCasual(http.StatusBadRequest, app.ParamBad, err)
+        lb.SetError(err)
+        return
+    }
+
+
+    HomeworkTestResult, err := service.GetHomeworkData(ctx, materialId)
+    if err != nil {
+        appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+        lb.SetError(err)
+        return
+    }
+
+
+    appG.ResponseCasual(http.StatusOK, app.SUCCESS, HomeworkTestResult)
+}
+
+```
+
+```
+controller_model/materials.go
+package controller_model
+
+
+import "Pairotto/Pairotto/dao/repository"
+
+
+type MaterialCreateHomeworkReq struct {
+    MaterialIDs []int `json:"material_ids" bson:"material_ids"`
+    CreateTxt   bool  `json:"create_txt" bson:"create_txt"`
+}
+
+
+type MaterialCreateHomeworkResp struct {
+    ProcessingMaterials     []int                `json:"process_materials" bson:"process_materials"`
+    AlreadyExistedMaterials []int                `json:"existed_materials" bson:"existed_materials"`
+    State                   repository.TestState `json:"state" bson:"state"`
+    TaskID                  string               `json:"task_id" bson:"task_id"`
+}
+
+```
+
+```
+dao/repo
+package repository
+
+
+import (
+    "Pairotto/Pairotto/dao/mongodb"
+    "context"
+    "fmt"
+    "strconv"
+
+
+    "go.mongodb.org/mongo-driver/bson"
+)
+
+
+const MaterialHWCollectionName = "materials_homework_data"
+
+
+type MaterialsHomeworkRepository struct {
+    *mongodb.BaseRepository
+}
+
+
+func GenerateHomeworkDataKey() string {
+    return fmt.Sprintf("%s_%s", AppName, MaterialHWCollectionName)
+
+
+}
+
+
+func NewMaterialsHomeworkRepository() *MaterialsHomeworkRepository {
+    return &MaterialsHomeworkRepository{
+        BaseRepository: mongodb.NewBaseRepository(GenerateHomeworkDataKey()),
+    }
+}
+
+
+// ====== Structs ======
+type HomeworkData struct {
+    TaskID       string               `json:"task_id" bson:"task_id"`
+    MaterialID   int                  `json:"material_id" bson:"material_id"`
+    State        TestState            `json:"state" bson:"state"` // "failed" | "processing" | "completed"
+    Message      string               `json:"message,omitempty" bson:"message,omitempty"`
+    InterestTags []string             `json:"interest_tags" bson:"interest_tags"`
+    Audience     string               `json:"audience" bson:"audience"`
+    AgeGroups    []int                `json:"age_groups" bson:"age_groups"`
+    IndustryTags []string             `json:"industry_tags" bson:"industry_tags"`
+    CefrLevel    string               `json:"cefr_level" bson:"cefr_level"`
+    Vocabulary   []HomeworkVocabulary `json:"vocabulary" bson:"vocabulary"`
+    Questions    []HomeworkQuestion   `json:"questions" bson:"questions"`
+    TxtLink      string               `json:"txt_link" bson:"txt_link"`
+}
+
+
+type HomeworkVocabulary struct {
+    Word       string `json:"word" bson:"word"`
+    Definition string `json:"definition" bson:"definition"`
+}
+
+
+type HomeworkQuestion struct {
+    Question      string   `json:"question" bson:"question"`
+    Options       []string `json:"options" bson:"options"`
+    CorrectAnswer string   `json:"correct_answer" bson:"correct_answer"`
+    CorrectIndex  int      `json:"correct_index" bson:"correct_index"`
+}
+
+
+func (r *MaterialsHomeworkRepository) GetHomeWorkData(ctx context.Context, materialID string) (*HomeworkData, error) {
+    mid, err := strconv.Atoi(materialID)
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{"material_id": mid}
+    var result HomeworkData
+    err = r.FindOne(ctx, filter, &result)
+    if err != nil {
+        return nil, err
+    }
+    return &result, nil
+}
+
+
+func (r *MaterialsHomeworkRepository) ExistsByMaterialID(ctx context.Context, materialID int) (bool, error) {
+    filter := bson.M{"material_id": materialID}
+    isExist, err := r.Exists(ctx, filter)
+    if err != nil {
+        return false, err
+    }
+    return isExist, nil
+}
+
+
+func (r *MaterialsHomeworkRepository) GetStateByMaterialID(ctx context.Context, materialID int) (*TestState, error) {
+    //mid, err := strconv.Atoi(materialID)
+    //if err != nil {
+    //  return nil, err
+    //}
+    filter := bson.M{"material_id": materialID}
+    var result HomeworkData
+    err := r.FindOne(ctx, filter, &result)
+    if err != nil {
+        return nil, err
+    }
+    return &result.State, nil
+}
+```
+
+```
+service / init.
+package service
+
+
+func GetMaterialsHWStructuredOutputSetting() map[string]interface{} {
+    return map[string]interface{}{
+        "type": "object",
+        "properties": map[string]interface{}{
+            "material_id": map[string]interface{}{
+                "type": "number",
+            },
+            "interest_tags": map[string]interface{}{
+                "type":        "array",
+                "items":       map[string]interface{}{"type": "string"},
+                "description": "Relevant interest tags from the predefined list",
+            },
+            "audience": map[string]interface{}{
+                "type":        "string",
+                "enum":        []interface{}{"Adult", "Junior"},
+                "description": "Target audience type",
+            },
+            "age_groups": map[string]interface{}{
+                "type":        "array",
+                "items":       map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 5},
+                "description": "Age groups for Junior audience (1-5)",
+            },
+            "industry_tags": map[string]interface{}{
+                "type":        "array",
+                "items":       map[string]interface{}{"type": "string"},
+                "description": "Industry tags for Adult audience",
+            },
+            "cefr_level": map[string]interface{}{
+                "type":        "string",
+                "enum":        []interface{}{"Pre A1", "A1", "A2", "B1", "B2", "C1", "C2"},
+                "description": "CEFR level assessment",
+            },
+            "vocabulary": map[string]interface{}{
+                "type": "array",
+                "items": map[string]interface{}{
+                    "type":                 "object",
+                    "properties":           map[string]interface{}{"word": map[string]interface{}{"type": "string"}, "definition": map[string]interface{}{"type": "string"}},
+                    "required":             []string{"word", "definition"},
+                    "additionalProperties": false,
+                },
+                "minItems":    5,
+                "maxItems":    5,
+                "description": "Five vocabulary words with definitions",
+            },
+            "questions": map[string]interface{}{
+                "type": "array",
+                "items": map[string]interface{}{
+                    "type": "object",
+                    "properties": map[string]interface{}{
+                        "question":       map[string]interface{}{"type": "string"},
+                        "options":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "minItems": 4, "maxItems": 4},
+                        "correct_answer": map[string]interface{}{"type": "string"},
+                        "correct_index":  map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 3},
+                    },
+                    "required":             []string{"question", "options", "correct_answer", "correct_index"},
+                    "additionalProperties": false,
+                },
+                "minItems":    5,
+                "maxItems":    5,
+                "description": "Five multiple-choice questions",
+            },
+        },
+        "required":             []string{"material_id", "interest_tags", "audience", "industry_tags", "vocabulary", "questions"},
+        "additionalProperties": false,
+    }
+}
+
+
+func GetMaterialAnalysisPromptSetting() map[string]interface{} {
+    return map[string]interface{}{
+        "type": "object",
+        "properties": map[string]interface{}{
+            "cover_page": map[string]interface{}{
+                "type": "object",
+                "properties": map[string]interface{}{
+                    "course_title":        map[string]interface{}{"type": "string"},
+                    "lesson_overview":     map[string]interface{}{"type": "string"},
+                    "target_learners":     map[string]interface{}{"type": "string"},
+                    "main_skills_focused": map[string]interface{}{"type": "string"},
+                    "visual_description":  map[string]interface{}{"type": "string"},
+                    "pedagogical_summary": map[string]interface{}{"type": "string"},
+                },
+                "required": []string{
+                    "course_title", "lesson_overview", "target_learners", "main_skills_focused", "visual_description", "pedagogical_summary",
+                },
+                "additionalProperties": false,
+            },
+            "pages": map[string]interface{}{
+                "type": "array",
+                "items": map[string]interface{}{
+                    "type": "object",
+                    "properties": map[string]interface{}{
+                        "page_number":         map[string]interface{}{"type": "integer"},
+                        "page_title":          map[string]interface{}{"type": "string"},
+                        "teaching_objectives": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                        "text_content": map[string]interface{}{
+                            "type": "object",
+                            "properties": map[string]interface{}{
+                                "headings":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "paragraphs":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "dialogues":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "instructions": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "lists":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "exercises":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "vocabulary":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "grammar":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "questions":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                            },
+                            "required": []string{
+                                "headings", "paragraphs", "dialogues", "instructions", "lists", "exercises", "vocabulary", "grammar", "questions",
+                            },
+                            "additionalProperties": false,
+                        },
+                        "visual_elements_analysis": map[string]interface{}{"type": "string"},
+                        "interactive_elements":     map[string]interface{}{"type": "string"},
+                        "language_focus": map[string]interface{}{
+                            "type": "object",
+                            "properties": map[string]interface{}{
+                                "grammar_structures": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "vocabulary_themes":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                                "skills_practiced":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                            },
+                            "required": []string{
+                                "grammar_structures", "vocabulary_themes", "skills_practiced",
+                            },
+                            "additionalProperties": false,
+                        },
+                        "cultural_contextual_info": map[string]interface{}{
+                            "type": "object",
+                            "properties": map[string]interface{}{
+                                "real_life_situations": map[string]interface{}{"type": "string"},
+                                "cultural_references":  map[string]interface{}{"type": "string"},
+                                "discussion_prompts":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                            },
+                            "required": []string{
+                                "real_life_situations", "cultural_references", "discussion_prompts",
+                            },
+                            "additionalProperties": false,
+                        },
+                        "pedagogical_evaluation":  map[string]interface{}{"type": "string"},
+                        "suggested_modifications": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+                    },
+                    "required": []string{
+                        "page_number", "page_title", "teaching_objectives", "text_content", "visual_elements_analysis", "interactive_elements", "language_focus", "cultural_contextual_info", "pedagogical_evaluation", "suggested_modifications",
+                    },
+                    "additionalProperties": false,
+                },
+            },
+        },
+        "required":             []string{"cover_page", "pages"},
+        "additionalProperties": false,
+    }
+}
+```
+
+```
+service/ createHomework.go
+package service
+
+
+import (
+    "Pairotto/Pairotto/client"
+    "Pairotto/Pairotto/service"
+    "encoding/csv"
+    "os"
+    "sort"
+    "strconv"
+
+
+    "Pairotto/Pairotto/dao/repository"
+    "Pairotto/Pairotto/sutil"
+    "Pairotto/conf"
+    "context"
+    "encoding/json"
+    "fmt"
+    "strings"
+    "time"
+
+
+    "github.com/openai/openai-go"
+    "go.mongodb.org/mongo-driver/bson"
+    "scm.tutorabc.com/tgo-framework/go-log"
+)
+
+
+type HomeworkTask struct {
+    MaterialID int
+    CreateTxt  bool
+    TaskID     string
+}
+
+
+const MaxConcurrentMaterials = 10
+
+
+var CreateHomeworkTaskChan = make(chan HomeworkTask, 1024)
+
+
+func GetHomeworkData(ctx context.Context, materialId string) (*repository.HomeworkData, error) {
+    repo := repository.NewMaterialsHomeworkRepository()
+
+
+    HomeworkData, err := repo.GetHomeWorkData(ctx, materialId)
+    if err != nil {
+        if err.Error() == "no data found" {
+            return nil, fmt.Errorf("material data not found for materialId: %s", materialId)
+        }
+        return nil, fmt.Errorf("failed to get Homework material data: %w", err)
+    }
+
+
+    if HomeworkData == nil {
+        return nil, fmt.Errorf("material data is nil for materialId: %s", materialId)
+    }
+
+
+    return HomeworkData, nil
+
+
+}
+```
+
+```
+func AddCreateHomeworkTask(reqMaterialIDs []int, createTxt bool, taskID string) error {
+    homeworkRepo := repository.NewMaterialsHomeworkRepository()
+    for _, id := range reqMaterialIDs {
+
+
+        // 丟進 channel
+        CreateHomeworkTaskChan <- HomeworkTask{MaterialID: id, CreateTxt: createTxt, TaskID: taskID}
+        // 寫入 HomeworkData
+        testData := &repository.HomeworkData{
+            MaterialID: id,
+            State:      repository.TestStateInProgress,
+            TaskID:     taskID,
+        }
+        filter := bson.M{"material_id": id}
+        if err := homeworkRepo.Upsert(context.Background(), filter, testData); err != nil {
+            return fmt.Errorf("failed to upsert homework data: %w", err)
+        }
+    }
+    return nil
+}
+func CheckMaterialsExist(materialIDs []int) (existMaterials []int, notExistMaterials []int, err error) {
+    // CheckMaterialsExist 檢查傳入的教材ID哪些存在於資料庫，哪些不存在
+
+
+    repo := repository.NewMaterialsHomeworkRepository()
+    for _, id := range materialIDs {
+        exists, err := repo.ExistsByMaterialID(context.Background(), id)
+        if err != nil {
+            return nil, nil, fmt.Errorf("failed to check material_id %d: %w", id, err)
+        }
+
+
+        if exists {
+            // 檢查素材的狀態是否是完成狀態
+            state, err := repo.GetStateByMaterialID(context.Background(), id)
+            if err != nil {
+                return nil, nil, fmt.Errorf("failed to check material_id state %d: %w", id, err)
+            }
+
+
+            if state != nil && *state == repository.TestStateCompleted {
+                // 只有當狀態是 TestStateCompleted 時才加入 existMaterials
+                existMaterials = append(existMaterials, id)
+            } else {
+                notExistMaterials = append(notExistMaterials, id)
+            }
+        } else {
+            // 如果素材不存在於資料庫，加入 notExistMaterials
+            notExistMaterials = append(notExistMaterials, id)
+        }
+    }
+    return
+}
+
+
+func DoCreateHomeworkTask() {
+    limiter := make(chan struct{}, MaxConcurrentMaterials)
+    log.Infof("DoCreateHomeworkTask started, MaxConcurrentMaterials=%d", MaxConcurrentMaterials)
+
+
+    for task := range CreateHomeworkTaskChan {
+        log.Infof("Received homework task, material_id=%d", task.MaterialID)
+
+
+        limiter <- struct{}{}
+
+
+        go func(t HomeworkTask) {
+            defer func() { <-limiter }()
+            defer func() {
+                if r := recover(); r != nil {
+                    log.Errorf("DoCreateHomeworkTask panic materials_id=%d: %v", t.MaterialID, r)
+                    _ = saveHomeworkFail(context.Background(), t.MaterialID, t.TaskID, fmt.Errorf("panic: %v", r))
+                }
+            }()
+
+
+            lb := sutil.NewLogBuild(context.Background(), "DoCreateHomeworkTask")
+
+
+            key := fmt.Sprintf(conf.Conf.Server.AppName, "createHomeWork", t.MaterialID)
+            log.Infof("Trying to acquire RedLock for material_id=%d, key=%s", t.MaterialID, key)
+
+
+            lock := client.GetRedLock(context.Background(), key, 1*time.Minute)
+
+
+            if err := lock.TryLock(); err != nil {
+                if err == client.ErrRsKeyIsExist {
+                    log.Infof("DoCreateHomeworkTask skip locked materials_id=%d key=%s", t.MaterialID, key)
+                    return
+                }
+                lb.SetError(err)
+                log.Error(lb)
+                return
+            }
+            defer func() {
+                if err := lock.UnLock(); err != nil {
+                    log.Warnf("DoCreateHomeworkTask unlock warn materials_id=%d key=%s: %v", t.MaterialID, key, err)
+                } else {
+                    log.Infof("RedLock released for material_id=%d, key=%s", t.MaterialID, key)
+                }
+            }()
+
+
+            tctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+            defer cancel()
+
+
+            log.Infof("DoCreateHomeworkTask processing materials_id=%d", t.MaterialID)
+            if _, err := SubmissionHomework(tctx, t.MaterialID, t.CreateTxt, t.TaskID); err != nil {
+                lb.SetError(err)
+                if upErr := saveHomeworkFail(context.Background(), t.MaterialID, t.TaskID, err); upErr != nil {
+                    log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", t.MaterialID, upErr)
+                }
+                log.Error(lb)
+                return
+            }
+            log.Infof("DoCreateHomeworkTask completed test_id=%d", t.MaterialID)
+
+
+        }(task)
+    }
+
+
+    log.Infof("DoCreateHomeworkTask finished, no more tasks in channel")
+}
+
+
+func saveHomeworkFail(ctx context.Context, materialID int, taskID string, err error) error {
+    repo := repository.NewMaterialsHomeworkRepository()
+    filter := bson.M{"material_id": materialID}
+    homeworkData := &repository.HomeworkData{
+        MaterialID: materialID,
+        State:      repository.TestStateFailed,
+        TaskID:     taskID,
+        Message:    err.Error(),
+    }
+    return repo.Upsert(ctx, filter, homeworkData)
+
+
+}
+
+
+func GetMatchedMaterialPaths(materialId int) (*client.MaterialResponse, error) {
+    // 拿教材圖片
+    req := client.MaterialRequest{
+        SceneType:      2,
+        Period:         45,
+        ClassStartTime: nil,
+        BrandId:        2,
+        MaterialId:     materialId,
+    }
+
+
+    response, err := client.GetMatchedMaterialPaths(req)
+    return response, err
+}
+
+
+func GetMaterialDetail(materialId int) (*client.MaterialDetailResponse, error) {
+    // 拿教材資訊
+    response, err := client.GetMaterialDetail(materialId)
+    return response, err
+}
+
+
+func GetCreateHWPrompt(brandId int) (string, error) {
+    var promptName string
+    //brandIds
+    //1 英文大人
+    //3 or 33 英文小孩
+    var tag string
+    if brandId == 1 {
+        promptName = "PairottoMaterialCreateHWAdult"
+        tag = "v1"
+    } else {
+        promptName = "PairottoMaterialCreateHWJunior"
+        tag = "v1"
+    }
+    //fmt.Println("promptName:", promptName)
+    data, err := client.AggregatePromptData(promptName, tag)
+
+
+    return data, err
+}
+
+
+func getMaterialImageUrls(materialId int) ([]string, error) {
+    // 教材產做業主流程: 1.拿到教材url
+    materialResponse, err := GetMatchedMaterialPaths(materialId)
+    if err != nil || materialResponse == nil {
+        return nil, fmt.Errorf("GetMatchedMaterialPaths failed: %v", err)
+    }
+
+
+    courseware := materialResponse.Data.Courseware
+    sort.Slice(courseware, func(i, j int) bool {
+        return courseware[i].Page < courseware[j].Page
+    })
+
+
+    urls := make([]string, 0, len(courseware))
+    for _, cw := range courseware {
+        urls = append(urls, cw.URL)
+    }
+    return urls, nil
+}
+
+
+func createHomeworkWithRetry(materialId int, brandId string, urls []string) (*repository.HomeworkData, error) {
+    // 教材產做業主流程: 3. openai 產課後作業: 失敗retry =>s3 => storage
+    domains := []string{
+        "dmaterials.tutormeet.com",
+        "s3.tutorabc.com",
+        "storage.tutorabc.com",
+    }
+
+
+    currentUrls := make([]string, len(urls))
+    copy(currentUrls, urls)
+
+
+    var lastErr error
+    for i, targetDomain := range domains {
+        if i > 0 {
+            // 從第二次開始需要替換 domain
+            for j := range currentUrls {
+                currentUrls[j] = strings.ReplaceAll(
+                    currentUrls[j],
+                    domains[i-1],
+                    targetDomain,
+                )
+            }
+        }
+
+
+        result, err := CreateHomeworkWithPngUrls(materialId, brandId, currentUrls)
+        if err == nil {
+            return result, nil
+        }
+        lastErr = err
+        log.Warnf("CreateHomeworkWithPngUrls failed with domain %s: %v", targetDomain, err)
+    }
+
+
+    return nil, fmt.Errorf("all domains failed, last error: %v", lastErr)
+}
+
+
+func SubmissionHomework(ctx context.Context, materialId int, createTxt bool, taskID string) (*repository.HomeworkData, error) {
+    defer sutil.TimeMeasurement(time.Now(), fmt.Sprintf("DoCreateHomeworkTask: %d", materialId))
+
+
+    // 1. Get material image URLs
+    urls, err := getMaterialImageUrls(materialId)
+    if err != nil {
+        return nil, handleHomeworkError(materialId, taskID, err)
+    }
+
+
+    // 2. Get material brand
+    brandId, err := GetMaterialDetail(materialId)
+    if err != nil {
+        return nil, handleHomeworkError(materialId, taskID, err)
+    }
+
+
+    // 3. Create homework with retry
+    result, err := createHomeworkWithRetry(materialId, brandId.Data.BrandIds, urls)
+    if err != nil {
+        return nil, handleHomeworkError(materialId, taskID, err)
+    }
+
+
+    // 4. Create text file if needed
+    if createTxt {
+        if txtUrl, txtErr := CreateHomeworkTxt(materialId, brandId.Data.BrandIds, result); txtErr == nil && txtUrl != "" {
+            result.TxtLink = txtUrl
+        } else if txtErr != nil {
+            log.Errorf("CreateHomeworkTxt failed: %v", txtErr)
+        }
+    }
+
+
+    // 5. Upload to GTR
+    gtrRequest := prepareGTRRequest(materialId, result)
+
+
+    if _, err := client.UploadMaterialHomework(&gtrRequest); err != nil {
+        log.Errorf("Failed to upload homework to GTR: %v", err)
+        return nil, handleHomeworkError(materialId, taskID, err)
+    }
+
+
+    // 6. Save to database
+    repo := repository.NewMaterialsHomeworkRepository()
+    filter := bson.M{
+        "material_id": materialId,
+    }
+    result.State = repository.TestStateCompleted
+    result.TaskID = taskID
+
+
+    if err := repo.Upsert(ctx, filter, result); err != nil {
+        return nil, err
+    }
+    return result, nil
+}
+
+
+func prepareGTRRequest(materialId int, result *repository.HomeworkData) client.BatchInsertRequest {
+    // 教材產做業主流程: 4.9 轉 HomeworkData成BatchInsertRequest 格式
+    gtrRequest := client.BatchInsertRequest{
+        MaterialId:   strconv.Itoa(materialId),
+        Vocabularies: make([]client.VocabularyRequest, 0, len(result.Vocabulary)),
+        Homeworks:    make([]client.HomeworkRequest, 0, len(result.Questions)),
+    }
+
+
+    // Process vocabulary
+    for _, vocab := range result.Vocabulary {
+        gtrRequest.Vocabularies = append(gtrRequest.Vocabularies, client.VocabularyRequest{
+            Vocabulary: vocab.Word,
+            Definition: vocab.Definition,
+        })
+    }
+
+
+    // Process questions
+    for _, question := range result.Questions {
+        questionOptions := make([]client.HomeworkOption, 0, len(question.Options))
+        for i, optionText := range question.Options {
+            questionOptions = append(questionOptions, client.HomeworkOption{
+                Option:    optionText,
+                IsCorrect: i == question.CorrectIndex,
+            })
+        }
+        gtrRequest.Homeworks = append(gtrRequest.Homeworks, client.HomeworkRequest{
+            Question: question.Question,
+            Options:  questionOptions,
+        })
+    }
+
+
+    // 加上 debug log 看實際資料
+    if jsonBytes, err := json.Marshal(gtrRequest); err == nil {
+        log.Infof("GTR request for material %d: %s", materialId, string(jsonBytes))
+    }
+
+
+    return gtrRequest
+}
+
+
+func handleHomeworkError(materialId int, taskID string, err error) error {
+    // 教材產做業主流程: 錯誤處理 helper
+    if upErr := saveHomeworkFail(context.Background(), materialId, taskID, err); upErr != nil {
+        log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", materialId, upErr)
+    }
+    return err
+}
+
+
+func saveHomeworkResult(ctx context.Context, materialId int, taskID string, result *repository.HomeworkData) error {
+    // 教材產做業主流程: complete state 資料庫更新
+    repo := repository.NewMaterialsHomeworkRepository()
+    filter := bson.M{"material_id": materialId}
+
+
+    result.State = repository.TestStateCompleted
+    result.TaskID = taskID
+
+
+    return repo.Upsert(ctx, filter, result)
+}
+
+```
+
+###########################
