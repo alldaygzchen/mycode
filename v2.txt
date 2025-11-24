@@ -1,0 +1,1462 @@
+## main.go 
+func main() {
+	// 命令行参数。
+	var configPath string
+	flag.StringVar(&configPath, "config", "conf/service.conf", "server config.")
+	flag.Parse()
+
+	// 解析配置。
+	if _, err := toml.DecodeFile(configPath, &conf.Conf); err != nil {
+		fmt.Printf("fail to read config.||err=%+v||config=%+v", err, configPath)
+		os.Exit(1)
+		return
+	}
+	config := conf.Conf
+	fmt.Println("load config:" + sutil.JsonString(config))
+	log.Init(&config.Log)
+	defer log.Close()
+
+	client.InitRedis(config.Redis)
+	mongodb.InitMongoDB()
+	initHttpAPI(config.APIConf)
+
+	//openaiClient := client.InitOpenAIClient(config.apikey)
+
+	//client.Setup(config.DB)
+	//defer client.CloseDB()
+	//統計NumGoroutine
+	go monitorInfo()
+
+	// task area
+	go service.DoWritingTask()
+	go service.DoListenReadingTask()
+	go service.DoSpeakingTask()
+	go materialService.DoCreateHomeworkTask()
+	go materialService.DoGenerateHomeworkTask()
+
+	svr := initHttpSvr(config)
+	svr.ListenAndServe()
+}
+
+### router.go
+// Materials for gtr optional callback
+v1.POST("/materials/homework/generate", materialsController.GenerateHomework)
+
+
+### controller_model/init.go
+type MaterialsController interface {
+	CreateHomework(*gin.Context)
+	HomeworkResultByMaterialID(*gin.Context)
+	HomeworkResultByTaskID(*gin.Context)
+	HomeworkResultToCSVByTaskID(*gin.Context)
+	// Materials for gtr optional callback
+	GenerateHomework(*gin.Context)
+}
+
+type materialsController struct{}
+
+func NewMaterialsController() MaterialsController {
+	return &materialsController{}
+}
+
+
+### controller_model/materials.go
+package controller_model
+
+import "Pairotto/Pairotto/dao/repository"
+
+type MaterialCreateHomeworkReq struct {
+	MaterialIDs []int `json:"material_ids" bson:"material_ids"`
+	CreateTxt   bool  `json:"create_txt" bson:"create_txt"`
+}
+
+type MaterialCreateHomeworkResp struct {
+	ProcessingMaterials     []int                `json:"process_materials" bson:"process_materials"`
+	AlreadyExistedMaterials []int                `json:"existed_materials" bson:"existed_materials"`
+	State                   repository.TestState `json:"state" bson:"state"`
+	TaskID                  string               `json:"task_id" bson:"task_id"`
+}
+
+// Materials for gtr optional callback
+
+// GenerateHomeworkReq 生成作業請求
+type GenerateHomeworkReq struct {
+	MaterialIDs []int  `json:"material_ids" binding:"required,min=1" bson:"material_ids"`
+	CreateTxt   bool   `json:"create_txt" bson:"create_txt"`
+	CallbackURL string `json:"callback_url,omitempty" bson:"callback_url,omitempty"`
+}
+
+type GenerateHomeworkSyncResp struct {
+	Results []HomeworkGenerateResult `json:"results" bson:"results"`
+}
+
+type HomeworkGenerateResult struct {
+	MaterialID int                      `json:"material_id" bson:"material_id"`
+	State      repository.TestState     `json:"state" bson:"state"`
+	Message    string                   `json:"message,omitempty" bson:"message,omitempty"`
+	Data       *repository.HomeworkData `json:"data,omitempty" bson:"data,omitempty"`
+}
+
+// GenerateHomeworkResp 異步模式回應
+type GenerateHomeworkAsyncResp struct {
+	TaskID string `json:"task_id" bson:"task_id"`
+	Status string `json:"status" bson:"status"` // "accepted"
+}
+
+
+### controller/materials.go
+package controller
+
+import (
+	"Pairotto/Pairotto/app"
+	"Pairotto/Pairotto/controller_model"
+	"Pairotto/Pairotto/dao/repository"
+	service "Pairotto/Pairotto/service/materials"
+	"Pairotto/Pairotto/sutil"
+	"errors"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"scm.tutorabc.com/tgo-framework/go-log"
+)
+
+func (c *materialsController) CreateHomework(ctx *gin.Context) {
+	// Implementation for handling Create Homework
+	reqCtx := ctx.Request.Context()
+	appG := app.Gin{C: ctx}
+	lb := sutil.NewLogBuild(reqCtx, "CreateHomework")
+	defer func() {
+		if lb.IsError() {
+			log.Error(lb)
+			return
+		}
+		log.Info(lb)
+	}()
+
+	var req controller_model.MaterialCreateHomeworkReq
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		appG.ResponseCasual(http.StatusBadRequest, app.ERROR, gin.H{"error": err.Error()})
+		lb.SetError(err)
+		return
+	}
+
+	// 先查詢資料庫判斷 material 是否存在
+	existMaterials, notExistMaterials, err := service.CheckMaterialsExist(req.MaterialIDs)
+	if err != nil {
+		lb.SetError(err)
+		appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+		return
+	}
+	// taskID
+	taskID := sutil.NewUUID()
+
+	// 不存在的 material 放進 AddCreateHomeworkTask
+	if len(notExistMaterials) > 0 {
+		err := service.AddCreateHomeworkTask(notExistMaterials, req.CreateTxt, taskID)
+		if err != nil {
+			lb.SetError(err)
+			appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+			return
+		}
+	}
+
+	// 回傳 resp，標示哪些已存在、哪些新建
+	resp := controller_model.MaterialCreateHomeworkResp{
+		ProcessingMaterials:     notExistMaterials,
+		AlreadyExistedMaterials: existMaterials,
+		State: func() repository.TestState {
+			if len(notExistMaterials) == 0 {
+				return repository.TestStateCompleted
+			}
+			return repository.TestStateInProgress
+		}(),
+		TaskID: taskID,
+	}
+
+	appG.ResponseCasual(http.StatusOK, app.SUCCESS, resp)
+}
+
+func (c *materialsController) HomeworkResultByMaterialID(ctx *gin.Context) {
+	// Implementation for handling HW results by material ID
+	reqCtx := ctx.Request.Context()
+	appG := app.Gin{C: ctx}
+	lb := sutil.NewLogBuild(reqCtx, "HomeworkResult")
+	defer func() {
+		if lb.IsError() {
+			log.Error(lb)
+			return
+		}
+		log.Info(lb)
+	}()
+
+	materialId := ctx.Param("material_id")
+	if materialId == "" {
+		err := errors.New("material_id is required")
+		appG.ResponseErrCasual(http.StatusBadRequest, app.ParamBad, err)
+		lb.SetError(err)
+		return
+	}
+
+	HomeworkTestResult, err := service.GetHomeworkData(ctx, materialId)
+	if err != nil {
+		appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+		lb.SetError(err)
+		return
+	}
+
+	appG.ResponseCasual(http.StatusOK, app.SUCCESS, HomeworkTestResult)
+}
+
+func (c *materialsController) HomeworkResultByTaskID(ctx *gin.Context) {
+	// Implementation for handling HW results by task ID
+	reqCtx := ctx.Request.Context()
+	appG := app.Gin{C: ctx}
+	lb := sutil.NewLogBuild(reqCtx, "HomeworkResult")
+	defer func() {
+		if lb.IsError() {
+			log.Error(lb)
+			return
+		}
+		log.Info(lb)
+	}()
+
+	taskId := ctx.Param("task_id")
+	if taskId == "" {
+		err := errors.New("task_id is required")
+		appG.ResponseErrCasual(http.StatusBadRequest, app.ParamBad, err)
+		lb.SetError(err)
+		return
+	}
+
+	HomeworkTestResult, err := service.GetHomeworkDataByTask(ctx, taskId)
+	if err != nil {
+		appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+		lb.SetError(err)
+		return
+	}
+
+	appG.ResponseCasual(http.StatusOK, app.SUCCESS, HomeworkTestResult)
+}
+
+func (c *materialsController) HomeworkResultToCSVByTaskID(ctx *gin.Context) {
+	// Implementation for handling HW results to csv by task ID
+	reqCtx := ctx.Request.Context()
+	appG := app.Gin{C: ctx}
+	lb := sutil.NewLogBuild(reqCtx, "HomeworkResult")
+	defer func() {
+		if lb.IsError() {
+			log.Error(lb)
+			return
+		}
+		log.Info(lb)
+	}()
+
+	taskId := ctx.Param("task_id")
+	if taskId == "" {
+		err := errors.New("task_id is required")
+		appG.ResponseErrCasual(http.StatusBadRequest, app.ParamBad, err)
+		lb.SetError(err)
+		return
+	}
+
+	// task to csv upload to oss
+	HomeworkTestResult, err := service.HomeworkDataToCSVByTask(ctx, taskId)
+
+	if err != nil {
+		appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+		lb.SetError(err)
+		return
+	}
+
+	appG.ResponseCasual(http.StatusOK, app.SUCCESS, HomeworkTestResult)
+}
+
+// Materials for gtr optional callback
+
+func (c *materialsController) GenerateHomework(ctx *gin.Context) {
+	context := ctx.Request.Context()
+	appG := app.Gin{C: ctx}
+	lb := sutil.NewLogBuild(context, "GenerateHomework")
+	defer func() {
+		if lb.IsError() {
+			log.Error(lb)
+			return
+		}
+		log.Info(lb)
+	}()
+
+	// 1. 解析請求
+	var req controller_model.GenerateHomeworkReq
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		appG.ResponseCasual(http.StatusBadRequest, app.ERROR, gin.H{"error": err.Error()})
+		lb.SetError(err)
+		return
+	}
+
+	// 2. 參數驗證
+	if len(req.MaterialIDs) == 0 {
+		err := errors.New("material_ids cannot be empty")
+		appG.ResponseErrCasual(http.StatusBadRequest, app.ParamBad, err)
+		lb.SetError(err)
+		return
+	}
+
+	// 3. 判斷模式：有 callback URL = 異步，否則 = 同步
+	if req.CallbackURL != "" {
+		// ========== 異步模式 ==========
+		taskID, err := service.GenerateHomeworkAsync(req.MaterialIDs, req.CreateTxt, req.CallbackURL)
+		if err != nil {
+			lb.SetError(err)
+			appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+			return
+		}
+
+		resp := controller_model.GenerateHomeworkAsyncResp{
+			TaskID: taskID,
+			Status: "accepted",
+		}
+		appG.ResponseCasual(http.StatusAccepted, app.SUCCESS, resp)
+
+	} else {
+		// ========== 同步模式 ==========
+		results, err := service.GenerateHomeworkSync(context, req.MaterialIDs, req.CreateTxt)
+		if err != nil {
+			lb.SetError(err)
+			appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+			return
+		}
+
+		resp := controller_model.GenerateHomeworkSyncResp{
+			Results: results,
+		}
+		appG.ResponseCasual(http.StatusOK, app.SUCCESS, resp)
+	}
+}
+
+
+
+### service/generateHomework.go
+package service
+
+import (
+	"Pairotto/Pairotto/client"
+	"Pairotto/Pairotto/controller_model"
+	"Pairotto/Pairotto/dao/repository"
+	"Pairotto/Pairotto/sutil"
+	"Pairotto/conf"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"scm.tutorabc.com/tgo-framework/go-log"
+)
+
+// ========== 任務結構 ==========
+
+type GenerateHomeworkTask struct {
+	MaterialID  int
+	CreateTxt   bool
+	TaskID      string
+	CallbackURL string
+}
+
+var GenerateHomeworkTaskChan = make(chan GenerateHomeworkTask, 1024)
+
+// ========== 異步模式：放入 worker queue ==========
+
+func GenerateHomeworkAsync(materialIDs []int, createTxt bool, callbackURL string) (string, error) {
+	taskID := sutil.NewUUID()
+	homeworkRepo := repository.NewMaterialsHomeworkRepository()
+
+	// 為每個 materialID 創建初始記錄並放入 queue
+	for _, materialID := range materialIDs {
+		// 1. 初始化資料庫記錄
+		testData := &repository.HomeworkData{
+			MaterialID: materialID,
+			State:      repository.TestStateInProgress,
+			TaskID:     taskID,
+		}
+		filter := bson.M{"material_id": materialID}
+		if err := homeworkRepo.Upsert(context.Background(), filter, testData); err != nil {
+			return "", fmt.Errorf("failed to upsert homework data: %w", err)
+		}
+
+		// 2. 放入 worker queue
+		GenerateHomeworkTaskChan <- GenerateHomeworkTask{
+			MaterialID:  materialID,
+			CreateTxt:   createTxt,
+			TaskID:      taskID,
+			CallbackURL: callbackURL,
+		}
+	}
+
+	log.Infof("GenerateHomeworkAsync: taskID=%s, materials=%v, callback=%s",
+		taskID, materialIDs, callbackURL)
+
+	return taskID, nil
+}
+
+// ========== 同步模式：直接執行 =========
+
+func GenerateHomeworkSync(ctx context.Context, materialIDs []int, createTxt bool) ([]controller_model.HomeworkGenerateResult, error) {
+	results := make([]controller_model.HomeworkGenerateResult, 0, len(materialIDs))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// 併發處理所有 materialIDs (最多 10 個並發)
+	semaphore := make(chan struct{}, 10)
+
+	for _, materialID := range materialIDs {
+		wg.Add(1)
+		go func(mid int) {
+			defer wg.Done()
+			semaphore <- struct{}{}        // 獲取信號量
+			defer func() { <-semaphore }() // 釋放信號量
+
+			result := processHomeworkSync(ctx, mid, createTxt)
+
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		}(materialID)
+	}
+
+	wg.Wait()
+	return results, nil
+}
+
+func processHomeworkSync(ctx context.Context, materialID int, createTxt bool) controller_model.HomeworkGenerateResult {
+	// 直接調用 SubmissionHomework，不經過 worker
+	taskID := sutil.NewUUID() // 每個同步任務有自己的 taskID
+
+	homeworkData, err := SubmissionHomework(ctx, materialID, createTxt, taskID)
+	if err != nil {
+		log.Errorf("processHomeworkSync failed for material %d: %v", materialID, err)
+		return controller_model.HomeworkGenerateResult{
+			MaterialID: materialID,
+			State:      repository.TestStateFailed,
+			Message:    err.Error(),
+		}
+	}
+
+	return controller_model.HomeworkGenerateResult{
+		MaterialID: materialID,
+		State:      repository.TestStateCompleted,
+		Data:       homeworkData,
+	}
+}
+
+func DoGenerateHomeworkTask() {
+	limiter := make(chan struct{}, MaxConcurrentMaterials)
+	log.Infof("DoGenerateHomeworkTask started, MaxConcurrentMaterials=%d", MaxConcurrentMaterials)
+
+	for task := range GenerateHomeworkTaskChan {
+		log.Infof("Received homework task, material_id=%d, taskID=%s", task.MaterialID, task.TaskID)
+
+		limiter <- struct{}{}
+
+		go func(t GenerateHomeworkTask) {
+			defer func() { <-limiter }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("DoCreateHomeworkTask panic materials_id=%d: %v", t.MaterialID, r)
+					_ = saveHomeworkFail(context.Background(), t.MaterialID, t.TaskID, fmt.Errorf("panic: %v", r))
+				}
+			}()
+
+			lb := sutil.NewLogBuild(context.Background(), "DoCreateHomeworkTask")
+
+			key := fmt.Sprintf("%s_createHomeWork_%d", conf.Conf.Server.AppName, t.MaterialID)
+			log.Infof("Trying to acquire RedLock for material_id=%d, key=%s", t.MaterialID, key)
+
+			lock := client.GetRedLock(context.Background(), key, 1*time.Minute)
+
+			if err := lock.TryLock(); err != nil {
+				if err == client.ErrRsKeyIsExist {
+					log.Infof("DoCreateHomeworkTask skip locked materials_id=%d key=%s", t.MaterialID, key)
+					return
+				}
+				lb.SetError(err)
+				log.Error(lb)
+				return
+			}
+			defer func() {
+				if err := lock.UnLock(); err != nil {
+					log.Warnf("DoCreateHomeworkTask unlock warn materials_id=%d key=%s: %v", t.MaterialID, key, err)
+				} else {
+					log.Infof("RedLock released for material_id=%d, key=%s", t.MaterialID, key)
+				}
+			}()
+
+			tctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+			defer cancel()
+
+			log.Infof("DoCreateHomeworkTask processing materials_id=%d", t.MaterialID)
+			_, err := SubmissionHomework(tctx, t.MaterialID, t.CreateTxt, t.TaskID)
+			if err != nil {
+				lb.SetError(err)
+				if upErr := saveHomeworkFail(context.Background(), t.MaterialID, t.TaskID, err); upErr != nil {
+					log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", t.MaterialID, upErr)
+				}
+				log.Error(lb)
+
+				//  異步模式：檢查是否需要發送 callback
+				if t.CallbackURL != "" {
+					checkAndSendCallback(t.TaskID, t.CallbackURL)
+				}
+				return
+			}
+			log.Infof("DoCreateHomeworkTask completed test_id=%d", t.MaterialID)
+
+			//  異步模式：檢查是否需要發送 callback
+			if t.CallbackURL != "" {
+				checkAndSendCallback(t.TaskID, t.CallbackURL)
+			}
+
+		}(task)
+	}
+
+	log.Infof("DoCreateHomeworkTask finished, no more tasks in channel")
+}
+
+// ========== Callback 處理 ==========
+func checkAndSendCallback(taskID string, callbackURL string) {
+	homeworkRepo := repository.NewMaterialsHomeworkRepository()
+	ctx := context.Background()
+
+	// 查詢該 taskID 下的所有 materials
+	filter := bson.M{"task_id": taskID}
+	var homeworkDataList []repository.HomeworkData
+
+	err := homeworkRepo.Find(ctx, filter, &homeworkDataList)
+	if err != nil {
+		log.Errorf("checkAndSendCallback: failed to find homework data for taskID=%s: %v", taskID, err)
+		return
+	}
+
+	// 檢查是否所有 materials 都已完成（completed 或 failed）
+	allCompleted := true
+	for _, data := range homeworkDataList {
+		if data.State == repository.TestStateInProgress {
+			allCompleted = false
+			break
+		}
+	}
+
+	if !allCompleted {
+		log.Infof("checkAndSendCallback: taskID=%s not all completed yet", taskID)
+		return
+	}
+
+	// ✅ 所有都完成了，發送 callback
+	log.Infof("checkAndSendCallback: taskID=%s all completed, sending callback to %s", taskID, callbackURL)
+	sendCallbackBatch(taskID, callbackURL, homeworkDataList)
+}
+
+func sendCallbackBatch(taskID string, callbackURL string, homeworkDataList []repository.HomeworkData) {
+	// 構建 callback payload
+	type CallbackPayload struct {
+		TaskID  string                      `json:"task_id"`
+		Results []client.BatchInsertRequest `json:"results"`
+	}
+
+	payload := CallbackPayload{
+		TaskID:  taskID,
+		Results: make([]client.BatchInsertRequest, 0, len(homeworkDataList)),
+	}
+
+	for _, data := range homeworkDataList {
+		if data.State == repository.TestStateCompleted {
+			// 使用現有的 prepareGTRRequest 函數
+			gtrRequest := prepareGTRRequest(data.MaterialID, &data)
+			payload.Results = append(payload.Results, gtrRequest)
+		} else {
+			// Failed 的情況，構建空結果
+			payload.Results = append(payload.Results, client.BatchInsertRequest{
+				MaterialId:   fmt.Sprintf("%d", data.MaterialID),
+				Vocabularies: []client.VocabularyRequest{},
+				Homeworks:    []client.HomeworkRequest{},
+			})
+		}
+	}
+
+	// 發送 HTTP callback
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Errorf("sendCallbackBatch: failed to marshal payload for taskID=%s: %v", taskID, err)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, callbackURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Errorf("sendCallbackBatch: failed to create request for taskID=%s: %v", taskID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Errorf("sendCallbackBatch: HTTP request failed for taskID=%s: %v", taskID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Errorf("sendCallbackBatch: callback returned status %d for taskID=%s", resp.StatusCode, taskID)
+		return
+	}
+
+	log.Infof("sendCallbackBatch: successfully sent callback for taskID=%s to %s", taskID, callbackURL)
+}
+### service/createHomework.go
+package service
+
+import (
+	"Pairotto/Pairotto/client"
+	"Pairotto/Pairotto/service"
+	"encoding/csv"
+	"os"
+	"sort"
+	"strconv"
+
+	"Pairotto/Pairotto/dao/repository"
+	"Pairotto/Pairotto/sutil"
+	"Pairotto/conf"
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/openai/openai-go"
+	"go.mongodb.org/mongo-driver/bson"
+	"scm.tutorabc.com/tgo-framework/go-log"
+)
+
+type HomeworkTask struct {
+	MaterialID int
+	CreateTxt  bool
+	TaskID     string
+}
+
+const MaxConcurrentMaterials = 10
+
+var CreateHomeworkTaskChan = make(chan HomeworkTask, 1024)
+
+func GetHomeworkData(ctx context.Context, materialId string) (*repository.HomeworkData, error) {
+	repo := repository.NewMaterialsHomeworkRepository()
+
+	HomeworkData, err := repo.GetHomeWorkData(ctx, materialId)
+	if err != nil {
+		if err.Error() == "no data found" {
+			return nil, fmt.Errorf("material data not found for materialId: %s", materialId)
+		}
+		return nil, fmt.Errorf("failed to get Homework material data: %w", err)
+	}
+
+	if HomeworkData == nil {
+		return nil, fmt.Errorf("material data is nil for materialId: %s", materialId)
+	}
+
+	return HomeworkData, nil
+
+}
+
+func GetHomeworkDataByTask(ctx context.Context, taskId string) ([]*repository.HomeworkData, error) {
+	repo := repository.NewMaterialsHomeworkRepository()
+
+	HomeworkDataList, err := repo.GetStateByTaskID(ctx, taskId)
+	if err != nil {
+		if err.Error() == "no data found" {
+			return nil, fmt.Errorf("task data not found for taskId: %s", taskId)
+		}
+		return nil, fmt.Errorf("failed to get Homework task data: %w", err)
+	}
+
+	if HomeworkDataList == nil || len(HomeworkDataList) == 0 {
+		return nil, fmt.Errorf("task data is nil or empty for taskId: %s", taskId)
+	}
+
+	return HomeworkDataList, nil
+}
+
+// task to csv upload
+func HomeworkDataToCSVByTask(ctx context.Context, taskId string) (string, error) {
+	repo := repository.NewMaterialsHomeworkRepository()
+
+	HomeworkDataList, err := repo.GetStateByTaskID(ctx, taskId)
+	if err != nil {
+		if err.Error() == "no data found" {
+			return "", fmt.Errorf("task data not found for taskId: %s", taskId)
+		}
+		return "", fmt.Errorf("failed to get Homework task data: %w", err)
+	}
+
+	if HomeworkDataList == nil || len(HomeworkDataList) == 0 {
+		return "", fmt.Errorf("task data is nil or empty for taskId: %s", taskId)
+	}
+
+	var csvData [][]string
+	header := []string{
+		"MaterialSn", "Interest Tags", "Target Audience", "Industry Tags", "Age Groups", "CEFR Level",
+		"Vocabulary1", "Vocabulary2", "Vocabulary3", "Vocabulary4", "Vocabulary5",
+		"Question1", "Question2", "Question3", "Question4", "Question5",
+	}
+	csvData = append(csvData, header)
+
+	for _, hw := range HomeworkDataList {
+		interestTags := strings.Join(hw.InterestTags, ", ")
+		industryTags := strings.Join(hw.IndustryTags, ", ")
+		ageGroups := make([]string, len(hw.AgeGroups))
+		for i, v := range hw.AgeGroups {
+			ageGroups[i] = strconv.Itoa(v)
+		}
+		ageGroupsStr := strings.Join(ageGroups, ",")
+		vocabStrs := make([]string, 5)
+		for i := 0; i < 5; i++ {
+			if i < len(hw.Vocabulary) {
+				// 改用 ASCII 的 `-` 取代 `–`
+				vocabStrs[i] = fmt.Sprintf("%s - %s", hw.Vocabulary[i].Word, hw.Vocabulary[i].Definition)
+			} else {
+				vocabStrs[i] = ""
+			}
+		}
+		questionStrs := make([]string, 5)
+		for i := 0; i < 5; i++ {
+			if i < len(hw.Questions) {
+				q := hw.Questions[i]
+				options := make([]string, len(q.Options))
+				for j, opt := range q.Options {
+					optClean := strings.ReplaceAll(opt, "©", "C")
+					correct := ""
+					if j == q.CorrectIndex {
+						correct = " (Correct)"
+					}
+					options[j] = fmt.Sprintf("(%c) %s%s", 'A'+j, optClean, correct)
+				}
+				questionStrs[i] = fmt.Sprintf("%s %s", q.Question, strings.Join(options, " "))
+			} else {
+				questionStrs[i] = ""
+			}
+		}
+		row := []string{
+			strconv.Itoa(hw.MaterialID),
+			interestTags,
+			hw.Audience,
+			industryTags,
+			ageGroupsStr,
+			hw.CefrLevel,
+			vocabStrs[0], vocabStrs[1], vocabStrs[2], vocabStrs[3], vocabStrs[4],
+			questionStrs[0], questionStrs[1], questionStrs[2], questionStrs[3], questionStrs[4],
+		}
+		csvData = append(csvData, row)
+	}
+	file, err := os.Create(fmt.Sprintf("homework_task_%s.csv", taskId))
+	if err != nil {
+		return "", fmt.Errorf("failed to create csv file: %w", err)
+	}
+	defer file.Close()
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+	if err := writer.WriteAll(csvData); err != nil {
+		return "", fmt.Errorf("failed to write csv: %w", err)
+	}
+
+	// 6. 上傳 CSV 到 OSS 並回傳連結
+	ossClient := client.NewOssClient()
+	now := time.Now()
+	remoteBasePath := fmt.Sprintf("%d/%02d/%02d/%s", now.Year(), now.Month(), now.Day(), taskId)
+	csvRemotePath := fmt.Sprintf("%s/homework_task_%s.csv", remoteBasePath, taskId)
+	ossUrl, err := ossClient.OssFileUpload(fmt.Sprintf("homework_task_%s.csv", taskId), csvRemotePath, false)
+	if err != nil {
+		return "", fmt.Errorf("failed to upload csv to OSS: %v", err)
+	}
+	log.Infof("csv file uploaded to OSS: %s", ossUrl)
+	_ = os.Remove(fmt.Sprintf("homework_task_%s.csv", taskId))
+
+	return ossUrl, nil
+
+}
+
+func AddCreateHomeworkTask(reqMaterialIDs []int, createTxt bool, taskID string) error {
+	homeworkRepo := repository.NewMaterialsHomeworkRepository()
+	for _, id := range reqMaterialIDs {
+
+		// 丟進 channel
+		CreateHomeworkTaskChan <- HomeworkTask{MaterialID: id, CreateTxt: createTxt, TaskID: taskID}
+		// 寫入 HomeworkData
+		testData := &repository.HomeworkData{
+			MaterialID: id,
+			State:      repository.TestStateInProgress,
+			TaskID:     taskID,
+		}
+		filter := bson.M{"material_id": id}
+		if err := homeworkRepo.Upsert(context.Background(), filter, testData); err != nil {
+			return fmt.Errorf("failed to upsert homework data: %w", err)
+		}
+	}
+	return nil
+}
+func CheckMaterialsExist(materialIDs []int) (existMaterials []int, notExistMaterials []int, err error) {
+	// CheckMaterialsExist 檢查傳入的教材ID哪些存在於資料庫，哪些不存在
+
+	repo := repository.NewMaterialsHomeworkRepository()
+	for _, id := range materialIDs {
+		exists, err := repo.ExistsByMaterialID(context.Background(), id)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to check material_id %d: %w", id, err)
+		}
+
+		if exists {
+			// 檢查素材的狀態是否是完成狀態
+			state, err := repo.GetStateByMaterialID(context.Background(), id)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to check material_id state %d: %w", id, err)
+			}
+
+			if state != nil && *state == repository.TestStateCompleted {
+				// 只有當狀態是 TestStateCompleted 時才加入 existMaterials
+				existMaterials = append(existMaterials, id)
+			} else {
+				notExistMaterials = append(notExistMaterials, id)
+			}
+		} else {
+			// 如果素材不存在於資料庫，加入 notExistMaterials
+			notExistMaterials = append(notExistMaterials, id)
+		}
+	}
+	return
+}
+
+func DoCreateHomeworkTask() {
+	limiter := make(chan struct{}, MaxConcurrentMaterials)
+	log.Infof("DoCreateHomeworkTask started, MaxConcurrentMaterials=%d", MaxConcurrentMaterials)
+
+	for task := range CreateHomeworkTaskChan {
+		log.Infof("Received homework task, material_id=%d", task.MaterialID)
+
+		limiter <- struct{}{}
+
+		go func(t HomeworkTask) {
+			defer func() { <-limiter }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("DoCreateHomeworkTask panic materials_id=%d: %v", t.MaterialID, r)
+					_ = saveHomeworkFail(context.Background(), t.MaterialID, t.TaskID, fmt.Errorf("panic: %v", r))
+				}
+			}()
+
+			lb := sutil.NewLogBuild(context.Background(), "DoCreateHomeworkTask")
+
+			key := fmt.Sprintf(conf.Conf.Server.AppName, "createHomeWork", t.MaterialID)
+			log.Infof("Trying to acquire RedLock for material_id=%d, key=%s", t.MaterialID, key)
+
+			lock := client.GetRedLock(context.Background(), key, 1*time.Minute)
+
+			if err := lock.TryLock(); err != nil {
+				if err == client.ErrRsKeyIsExist {
+					log.Infof("DoCreateHomeworkTask skip locked materials_id=%d key=%s", t.MaterialID, key)
+					return
+				}
+				lb.SetError(err)
+				log.Error(lb)
+				return
+			}
+			defer func() {
+				if err := lock.UnLock(); err != nil {
+					log.Warnf("DoCreateHomeworkTask unlock warn materials_id=%d key=%s: %v", t.MaterialID, key, err)
+				} else {
+					log.Infof("RedLock released for material_id=%d, key=%s", t.MaterialID, key)
+				}
+			}()
+
+			tctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+			defer cancel()
+
+			log.Infof("DoCreateHomeworkTask processing materials_id=%d", t.MaterialID)
+			if _, err := SubmissionHomework(tctx, t.MaterialID, t.CreateTxt, t.TaskID); err != nil {
+				lb.SetError(err)
+				if upErr := saveHomeworkFail(context.Background(), t.MaterialID, t.TaskID, err); upErr != nil {
+					log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", t.MaterialID, upErr)
+				}
+				log.Error(lb)
+				return
+			}
+			log.Infof("DoCreateHomeworkTask completed test_id=%d", t.MaterialID)
+
+		}(task)
+	}
+
+	log.Infof("DoCreateHomeworkTask finished, no more tasks in channel")
+}
+
+func saveHomeworkFail(ctx context.Context, materialID int, taskID string, err error) error {
+	repo := repository.NewMaterialsHomeworkRepository()
+	filter := bson.M{"material_id": materialID}
+	homeworkData := &repository.HomeworkData{
+		MaterialID: materialID,
+		State:      repository.TestStateFailed,
+		TaskID:     taskID,
+		Message:    err.Error(),
+	}
+	return repo.Upsert(ctx, filter, homeworkData)
+
+}
+
+func GetMatchedMaterialPaths(materialId int) (*client.MaterialResponse, error) {
+	// 拿教材圖片
+	req := client.MaterialRequest{
+		SceneType:      2,
+		Period:         45,
+		ClassStartTime: nil,
+		BrandId:        2,
+		MaterialId:     materialId,
+	}
+
+	response, err := client.GetMatchedMaterialPaths(req)
+	return response, err
+}
+
+func GetMaterialDetail(materialId int) (*client.MaterialDetailResponse, error) {
+	// 拿教材資訊
+	response, err := client.GetMaterialDetail(materialId)
+	return response, err
+}
+
+func GetCreateHWPrompt(brandId int) (string, error) {
+	var promptName string
+	//brandIds
+	//1 英文大人
+	//3 or 33 英文小孩
+	var tag string
+	if brandId == 1 {
+		promptName = "PairottoMaterialCreateHWAdult"
+		tag = "v1"
+	} else {
+		promptName = "PairottoMaterialCreateHWJunior"
+		tag = "v1"
+	}
+	//fmt.Println("promptName:", promptName)
+	data, err := client.AggregatePromptData(promptName, tag)
+
+	return data, err
+}
+
+func getMaterialImageUrls(materialId int) ([]string, error) {
+	// 教材產做業主流程: 1.拿到教材url
+	materialResponse, err := GetMatchedMaterialPaths(materialId)
+	if err != nil || materialResponse == nil {
+		return nil, fmt.Errorf("GetMatchedMaterialPaths failed: %v", err)
+	}
+
+	courseware := materialResponse.Data.Courseware
+	sort.Slice(courseware, func(i, j int) bool {
+		return courseware[i].Page < courseware[j].Page
+	})
+
+	urls := make([]string, 0, len(courseware))
+	for _, cw := range courseware {
+		urls = append(urls, cw.URL)
+	}
+	return urls, nil
+}
+
+func createHomeworkWithRetry(materialId int, brandId string, urls []string) (*repository.HomeworkData, error) {
+	// 教材產做業主流程: 3. openai 產課後作業: 失敗retry =>s3 => storage
+	domains := []string{
+		"dmaterials.tutormeet.com",
+		"s3.tutorabc.com",
+		"storage.tutorabc.com",
+	}
+
+	currentUrls := make([]string, len(urls))
+	copy(currentUrls, urls)
+
+	var lastErr error
+	for i, targetDomain := range domains {
+		if i > 0 {
+			// 從第二次開始需要替換 domain
+			for j := range currentUrls {
+				currentUrls[j] = strings.ReplaceAll(
+					currentUrls[j],
+					domains[i-1],
+					targetDomain,
+				)
+			}
+		}
+
+		result, err := CreateHomeworkWithPngUrls(materialId, brandId, currentUrls)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		log.Warnf("CreateHomeworkWithPngUrls failed with domain %s: %v", targetDomain, err)
+	}
+
+	return nil, fmt.Errorf("all domains failed, last error: %v", lastErr)
+}
+
+func SubmissionHomework(ctx context.Context, materialId int, createTxt bool, taskID string) (*repository.HomeworkData, error) {
+	defer sutil.TimeMeasurement(time.Now(), fmt.Sprintf("DoCreateHomeworkTask: %d", materialId))
+
+	// 1. Get material image URLs
+	urls, err := getMaterialImageUrls(materialId)
+	if err != nil {
+		return nil, handleHomeworkError(materialId, taskID, err)
+	}
+
+	// 2. Get material brand
+	brandId, err := GetMaterialDetail(materialId)
+	if err != nil {
+		return nil, handleHomeworkError(materialId, taskID, err)
+	}
+
+	// 3. Create homework with retry
+	result, err := createHomeworkWithRetry(materialId, brandId.Data.BrandIds, urls)
+	if err != nil {
+		return nil, handleHomeworkError(materialId, taskID, err)
+	}
+
+	// 4. Create text file if needed
+	if createTxt {
+		if txtUrl, txtErr := CreateHomeworkTxt(materialId, brandId.Data.BrandIds, result); txtErr == nil && txtUrl != "" {
+			result.TxtLink = txtUrl
+		} else if txtErr != nil {
+			log.Errorf("CreateHomeworkTxt failed: %v", txtErr)
+		}
+	}
+
+	// 5. Upload to GTR
+	gtrRequest := prepareGTRRequest(materialId, result)
+
+	if _, err := client.UploadMaterialHomework(&gtrRequest); err != nil {
+		log.Errorf("Failed to upload homework to GTR: %v", err)
+		return nil, handleHomeworkError(materialId, taskID, err)
+	}
+
+	// 6. Save to database
+	repo := repository.NewMaterialsHomeworkRepository()
+	filter := bson.M{
+		"material_id": materialId,
+	}
+	result.State = repository.TestStateCompleted
+	result.TaskID = taskID
+
+	if err := repo.Upsert(ctx, filter, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func prepareGTRRequest(materialId int, result *repository.HomeworkData) client.BatchInsertRequest {
+	// 教材產做業主流程: 4.9 轉 HomeworkData成BatchInsertRequest 格式
+	gtrRequest := client.BatchInsertRequest{
+		MaterialId:   strconv.Itoa(materialId),
+		Vocabularies: make([]client.VocabularyRequest, 0, len(result.Vocabulary)),
+		Homeworks:    make([]client.HomeworkRequest, 0, len(result.Questions)),
+	}
+
+	// Process vocabulary
+	for _, vocab := range result.Vocabulary {
+		gtrRequest.Vocabularies = append(gtrRequest.Vocabularies, client.VocabularyRequest{
+			Vocabulary: vocab.Word,
+			Definition: vocab.Definition,
+		})
+	}
+
+	// Process questions
+	for _, question := range result.Questions {
+		questionOptions := make([]client.HomeworkOption, 0, len(question.Options))
+		for i, optionText := range question.Options {
+			questionOptions = append(questionOptions, client.HomeworkOption{
+				Option:    optionText,
+				IsCorrect: i == question.CorrectIndex,
+			})
+		}
+		gtrRequest.Homeworks = append(gtrRequest.Homeworks, client.HomeworkRequest{
+			Question: question.Question,
+			Options:  questionOptions,
+		})
+	}
+
+	// 加上 debug log 看實際資料
+	if jsonBytes, err := json.Marshal(gtrRequest); err == nil {
+		log.Infof("GTR request for material %d: %s", materialId, string(jsonBytes))
+	}
+
+	return gtrRequest
+}
+
+func handleHomeworkError(materialId int, taskID string, err error) error {
+	// 教材產做業主流程: 錯誤處理 helper
+	if upErr := saveHomeworkFail(context.Background(), materialId, taskID, err); upErr != nil {
+		log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", materialId, upErr)
+	}
+	return err
+}
+
+func saveHomeworkResult(ctx context.Context, materialId int, taskID string, result *repository.HomeworkData) error {
+	// 教材產做業主流程: complete state 資料庫更新
+	repo := repository.NewMaterialsHomeworkRepository()
+	filter := bson.M{"material_id": materialId}
+
+	result.State = repository.TestStateCompleted
+	result.TaskID = taskID
+
+	return repo.Upsert(ctx, filter, result)
+}
+
+//func SubmissionHomework(ctx context.Context, materialId int, creatTxt bool, taskID string) (*repository.HomeworkData, error) {
+//	defer sutil.TimeMeasurement(time.Now(), fmt.Sprintf("DoCreateHomeworkTask: %d", materialId))
+//
+//	// 1. 取得教材圖片 URL
+//	materialResponse, err := GetMatchedMaterialPaths(materialId)
+//	if err != nil || materialResponse == nil {
+//		if upErr := saveHomeworkFail(context.Background(), materialId, taskID, err); upErr != nil {
+//			log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", materialId, upErr)
+//		}
+//		return nil, fmt.Errorf("GetMatchedMaterialPaths failed: %v", err)
+//	}
+//	courseware := materialResponse.Data.Courseware
+//	sort.Slice(courseware, func(i, j int) bool {
+//		return courseware[i].Page < courseware[j].Page
+//	})
+//	urls := make([]string, 0, len(courseware))
+//	for _, cw := range courseware {
+//		urls = append(urls, cw.URL)
+//	}
+//
+//	// 2. 取得教材品牌
+//	GetMaterialDetailRes, err := GetMaterialDetail(materialId)
+//	if err != nil {
+//		if upErr := saveHomeworkFail(context.Background(), materialId, taskID, err); upErr != nil {
+//			log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", materialId, upErr)
+//		}
+//		return nil, fmt.Errorf("GetMaterialDetail failed: %v", err)
+//	}
+//	BrandId := GetMaterialDetailRes.Data.BrandIds
+//	log.Infof("brandId: %s", BrandId)
+//
+//	/// 3. 產生作業
+//	// 先嘗試原始 domainname dmaterials.tutormeet.com
+//	result, err := CreateHomeworkWithPngUrls(materialId, BrandId, urls)
+//	if err != nil {
+//		// 失敗時替換 dmaterials.tutormeet.com 為 s3.tutorabc.com 再重試
+//		for i := range urls {
+//			urls[i] = strings.ReplaceAll(urls[i], "dmaterials.tutormeet.com", "s3.tutorabc.com")
+//		}
+//		result, err = CreateHomeworkWithPngUrls(materialId, BrandId, urls)
+//		if err != nil {
+//			// 再失敗時替換 s3.tutorabc.com 為 storage.tutorabc.com 再重試
+//			for i := range urls {
+//				urls[i] = strings.ReplaceAll(urls[i], "s3.tutorabc.com", "storage.tutorabc.com")
+//			}
+//			result, err = CreateHomeworkWithPngUrls(materialId, BrandId, urls)
+//			if err != nil {
+//				log.Errorf("CreateHomeworkByImgUrls failed (after url replace): %v", err)
+//				if upErr := saveHomeworkFail(context.Background(), materialId, taskID, err); upErr != nil {
+//					log.Errorf("DoCreateHomeworkTask CRITICAL upsert fail test_id=%d: %v", materialId, upErr)
+//				}
+//				return nil, fmt.Errorf("CreateHomeworkWithPngUrls failed: %v", err)
+//			}
+//		}
+//	}
+//
+//	if creatTxt {
+//		txtUrl, txtErr := CreateHomeworkTxt(materialId, BrandId, result)
+//
+//		if txtErr != nil {
+//			log.Errorf("CreateHomeworkTxt failed: %v", txtErr)
+//		}
+//		if txtUrl != "" {
+//			result.TxtLink = txtUrl
+//		}
+//	}
+//
+//	// 7. Upload results to GTR material management backend
+//	gtrRequest := client.BatchInsertRequest{
+//		MaterialId:   strconv.Itoa(materialId),
+//		Vocabularies: make([]client.VocabularyRequest, 0, len(result.Vocabulary)),
+//		Homeworks:    make([]client.HomeworkRequest, 0, len(result.Questions)),
+//	}
+//
+//	// Process vocabulary list
+//	for _, vocab := range result.Vocabulary {
+//		gtrRequest.Vocabularies = append(gtrRequest.Vocabularies, client.VocabularyRequest{
+//			Vocabulary: vocab.Word,
+//			Definition: vocab.Definition,
+//		})
+//	}
+//
+//	// Process quiz questions
+//	for _, question := range result.Questions {
+//		questionOptions := make([]client.HomeworkOption, 0, len(question.Options))
+//		for i, optionText := range question.Options {
+//			questionOptions = append(questionOptions, client.HomeworkOption{
+//				Option:    optionText,
+//				IsCorrect: i == question.CorrectIndex,
+//			})
+//		}
+//		gtrRequest.Homeworks = append(gtrRequest.Homeworks, client.HomeworkRequest{
+//			Question: question.Question,
+//			Options:  questionOptions,
+//		})
+//	}
+//	// Upload to GTR backend system
+//	_, err = client.UploadMaterialHomework(&gtrRequest)
+//	if err != nil {
+//		log.Errorf("Failed to upload homework to GTR (after URL replacement): %v", err)
+//		if updateErr := saveHomeworkFail(context.Background(), materialId, taskID, err); updateErr != nil {
+//			log.Errorf("Failed to update homework status material_id=%d: %v", materialId, updateErr)
+//		}
+//		return nil, fmt.Errorf("Failed to generate homework: %v", err)
+//	}
+//
+//	// 8. 寫入資料庫
+//	repo := repository.NewMaterialsHomeworkRepository()
+//	filter := bson.M{
+//		"material_id": materialId,
+//	}
+//	result.State = repository.TestStateCompleted
+//	result.TaskID = taskID
+//
+//	if err := repo.Upsert(ctx, filter, result); err != nil {
+//		return nil, err
+//	}
+//
+//	return result, nil
+//
+//}
+
+func CreateHomeworkTxt(materialId int, BrandId string, result *repository.HomeworkData) (string, error) {
+
+	// 5. 輸出 TXT
+	txtfilename := fmt.Sprintf("%d_%s_result_ByImgUrls.txt", materialId, BrandId)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Material to Homework - ID: %d, Brand: %s\n", result.MaterialID, result.Audience))
+	sb.WriteString(strings.Repeat("=", 60) + "\n\n")
+	sb.WriteString("\n\nInterest Tags:\n")
+	sb.WriteString(strings.Join(result.InterestTags, ", "))
+	sb.WriteString("\n\nTarget Audience: \n")
+	sb.WriteString(result.Audience)
+	sb.WriteString("\n\nIndustry Tags: \n")
+	sb.WriteString(strings.Join(result.IndustryTags, ", "))
+	if len(result.AgeGroups) > 0 {
+		sb.WriteString("\n\nAge Groups: \n")
+		sb.WriteString(fmt.Sprintf("%v", result.AgeGroups))
+	}
+	sb.WriteString("\n\nCEFR Level: \n")
+	sb.WriteString(result.CefrLevel)
+	sb.WriteString("\n\nVocabulary:\n")
+	for i, v := range result.Vocabulary {
+		sb.WriteString(fmt.Sprintf("%d. %s – %s\n", i+1, v.Word, v.Definition))
+	}
+	sb.WriteString("\nQuestions:\n")
+	for i, q := range result.Questions {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, q.Question))
+		for j, opt := range q.Options {
+			optClean := strings.ReplaceAll(opt, "©", "C")
+			correct := ""
+			if j == q.CorrectIndex {
+				correct = " (Correct)"
+			}
+			sb.WriteString(fmt.Sprintf("(%c) %s%s\n", 'A'+j, optClean, correct))
+		}
+		sb.WriteString("\n")
+	}
+	if err := os.WriteFile(txtfilename, append([]byte("\xEF\xBB\xBF"), []byte(sb.String())...), 0644); err != nil {
+		return "", fmt.Errorf("failed to save result.txt: %v", err)
+	}
+	log.Infof("result saved to %s", txtfilename)
+
+	// 6. 上傳 OSS
+	ossClient := client.NewOssClient()
+	now := time.Now()
+	remoteBasePath := fmt.Sprintf("%d/%02d/%02d/%d", now.Year(), now.Month(), now.Day(), materialId)
+	txtRemotePath := fmt.Sprintf("%s/%d_%s_result_ByImgUrls.txt", remoteBasePath, materialId, BrandId)
+	ossUrl, err := ossClient.OssFileUpload(txtfilename, txtRemotePath, false)
+	if err != nil {
+		return "", fmt.Errorf("failed to upload txt to OSS: %v", err)
+	}
+	log.Infof("txt file uploaded to OSS: %s", ossUrl)
+	// 刪除本地 txt 檔案
+	_ = os.Remove(txtfilename)
+	return ossUrl, nil
+}
+
+func CreateHomeworkWithPngUrls(materialId int, brandIdStr string, pngUrls []string) (*repository.HomeworkData, error) {
+
+	// 取得 prompt（依品牌大人/小孩）
+
+	brandIdStrs := strings.Split(brandIdStr, ",")
+	brandId := 0
+	for _, idStr := range brandIdStrs {
+		id, err := strconv.Atoi(strings.TrimSpace(idStr))
+		if err != nil {
+			return nil, fmt.Errorf("invalid brandId: %s, error: %w", idStr, err)
+		}
+		if id == 3 || id == 33 {
+			brandId = 3
+			break
+		} else if id == 1 {
+			brandId = 1
+			break
+		}
+	}
+	if brandId == 0 {
+		return nil, fmt.Errorf("no valid brandId found in: %s", brandIdStr)
+	}
+
+	HWprompt, err := GetCreateHWPrompt(brandId)
+	if err != nil {
+		return nil, err
+	}
+
+	finalPrompt := fmt.Sprintf(HWprompt, materialId)
+
+	// OpenAI 輸出結構設定
+	structuredOutput := GetMaterialsHWStructuredOutputSetting()
+
+	// 組合訊息 parts
+	parts := []openai.ChatCompletionContentPartUnionParam{openai.TextContentPart(finalPrompt)}
+	if len(pngUrls) > 0 {
+		for _, url := range pngUrls {
+			imageParam := openai.ChatCompletionContentPartImageImageURLParam{URL: url, Detail: "high"}
+			imagePart := openai.ImageContentPart(imageParam)
+			parts = append(parts, imagePart)
+		}
+	}
+	//fmt.Printf("parts: + %v \n", parts)
+	//_, _ = json.MarshalIndent(parts, "", "  ")
+	//fmt.Println(string(b))
+	// 組合訊息 messages
+	messages := []openai.ChatCompletionMessageParamUnion{openai.UserMessage(parts)}
+	//fmt.Printf("messages: + %v \n", messages)
+	// 呼叫 OpenAI API
+	homeworkResult, err := service.CompletionChatCustomStructureModelFree("gpt-5-mini", structuredOutput, messages)
+	if err != nil {
+		return nil, fmt.Errorf("failed to complete chat homework custom structure: %w", err)
+	}
+
+	//fmt.Println("ProcessHomeworkAssistantOutput", homeworkResult)
+
+	// 解析結果
+	var output *repository.HomeworkData
+	err = json.Unmarshal([]byte(homeworkResult), &output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal chat result: %w", err)
+	}
+
+	return output, nil
+}
+
+func CreateHomeworkBySyllabus(materialId int, brandIdStr string, pngUrls []string) (*repository.HomeworkData, error) {
+
+	name := "PairottoSyllabus"
+	SyllabusPrompt, err := client.AggregatePromptData(name, "v1")
+	if err != nil {
+		return nil, err
+	}
+
+	// OpenAI 輸出結構設定
+	SyllabusStructuredOutput := GetMaterialAnalysisPromptSetting()
+
+	// 組合訊息 parts
+	parts := []openai.ChatCompletionContentPartUnionParam{openai.TextContentPart(SyllabusPrompt)}
+	if len(pngUrls) > 0 {
+		for _, url := range pngUrls {
+			imageParam := openai.ChatCompletionContentPartImageImageURLParam{URL: url, Detail: "high"}
+			imagePart := openai.ImageContentPart(imageParam)
+			parts = append(parts, imagePart)
+		}
+	}
+
+	// 組合訊息 messages
+	messages := []openai.ChatCompletionMessageParamUnion{openai.UserMessage(parts)}
+
+	// 呼叫 OpenAI API
+	SyllabusResult, err := service.CompletionChatCustomStructureModelFree("gpt-5-mini", SyllabusStructuredOutput, messages)
+
+	//SyllabusResult, err := service.CompletionChatCustomStructure(SyllabusStructuredOutput, messages)
+	if err != nil {
+		return nil, fmt.Errorf("failed to complete chat homework custom structure: %w", err)
+	}
+
+	err = os.WriteFile(fmt.Sprintf("syllabus_%d_%s.json", materialId, brandIdStr), []byte(SyllabusResult), 0644)
+	if err != nil {
+		log.Errorf("failed to write syllabusResult to file: %v", err)
+	}
+
+	// 取得 prompt（依品牌大人/小孩）
+	//brandId, err := strconv.Atoi(brandIdStr)
+	brandIdStrs := strings.Split(brandIdStr, ",")
+	brandId := 0
+	for _, idStr := range brandIdStrs {
+		id, err := strconv.Atoi(strings.TrimSpace(idStr))
+		if err != nil {
+			return nil, fmt.Errorf("invalid brandId: %s, error: %w", idStr, err)
+		}
+		if id == 3 || id == 33 {
+			brandId = 3
+			break
+		} else if id == 1 {
+			brandId = 1
+			break
+		}
+	}
+	if brandId == 0 {
+		return nil, fmt.Errorf("no valid brandId found in: %s", brandIdStr)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	HWprompt, err := GetCreateHWPrompt(brandId)
+	if err != nil {
+		return nil, err
+	}
+
+	Syllabus := fmt.Sprintf("Teaching syllabus: %v", SyllabusResult)
+	finalPrompt := fmt.Sprintf(HWprompt, materialId, Syllabus)
+	fmt.Printf("SyllabusHW finalPrompt: %s\n", finalPrompt)
+	// OpenAI 輸出結構設定
+	HWstructuredOutput := GetMaterialsHWStructuredOutputSetting()
+
+	// 組合訊息 parts
+	HWparts := []openai.ChatCompletionContentPartUnionParam{openai.TextContentPart(finalPrompt)}
+	if len(pngUrls) > 0 {
+		for _, url := range pngUrls {
+			imageParam := openai.ChatCompletionContentPartImageImageURLParam{URL: url, Detail: "high"}
+			imagePart := openai.ImageContentPart(imageParam)
+			parts = append(parts, imagePart)
+		}
+	}
+
+	// 組合訊息 messages
+	HWmessages := []openai.ChatCompletionMessageParamUnion{openai.UserMessage(HWparts)}
+
+	// 呼叫 OpenAI API
+	homeworkResult, err := service.CompletionChatCustomStructureModelFree("gpt-5-mini", HWstructuredOutput, HWmessages)
+
+	//homeworkResult, err := service.CompletionChatCustomStructure(HWstructuredOutput, HWmessages)
+	if err != nil {
+		return nil, fmt.Errorf("failed to complete chat homework custom structure: %w", err)
+	}
+
+	//fmt.Println("ProcessHomeworkAssistantOutput", homeworkResult)
+
+	// 解析結果
+	var output *repository.HomeworkData
+	err = json.Unmarshal([]byte(homeworkResult), &output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal chat result: %w", err)
+	}
+
+	return output, nil
+}
