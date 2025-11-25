@@ -1,0 +1,675 @@
+// In main.go
+go service.DoGenerateHomeworkTask()
+
+
+## router.go ## (done)
+```
+materialsController := materialsController.NewMaterialsController()
+v1.POST("/materials/homework/submission", materialsController.CreateHomework)
+v1.GET("/materials/homework/result/material/:material_id", materialsController.HomeworkResultByMaterialID)
+v1.GET("/materials/homework/result/task/:task_id", materialsController.HomeworkResultByTaskID)
+v1.GET("/materials/homework/result_to_csv/task/:task_id", materialsController.HomeworkResultToCSVByTaskID)
+v1.POST("/materials/homework/generate", materialsController.GenerateHomework)
+
+```
+### client/material.go ### (done)
+```
+
+type VocabularyRequest struct {
+    Vocabulary string `json:"vocabulary"`
+    Definition string `json:"definition"`
+}
+
+type HomeworkRequest struct {
+    Question string           `json:"question"`
+    Options  []HomeworkOption `json:"options"`
+}
+
+type HomeworkOption struct {
+    Option    string `json:"option"`
+    IsCorrect bool   `json:"isCorrect"`
+}
+```
+
+
+## controller_model/materials.go ## (done)
+```
+package controller_model
+
+
+import "Pairotto/Pairotto/dao/repository"
+
+
+type MaterialCreateHomeworkReq struct {
+    MaterialIDs []int `json:"material_ids" bson:"material_ids"`
+    CreateTxt   bool  `json:"create_txt" bson:"create_txt"`
+}
+
+
+type MaterialCreateHomeworkResp struct {
+    ProcessingMaterials     []int                `json:"process_materials" bson:"process_materials"`
+    AlreadyExistedMaterials []int                `json:"existed_materials" bson:"existed_materials"`
+    State                   repository.TestState `json:"state" bson:"state"`
+    TaskID                  string               `json:"task_id" bson:"task_id"`
+}
+
+#######################
+
+type MaterialGenerateHomeworkReq struct {
+    MaterialId int json:"materialId"
+    ImageUrls []string json:"imageUrls"
+    CallbackURL string `json:"callback_url,omitempty" bson:"callback_url,omitempty"`
+}
+
+type MaterialGenerateHomeworkAsyncResp struct {
+    TaskID string `json:"task_id" bson:"task_id"`
+    Status string `json:"status" bson:"status"` // "accepted"
+}
+
+type MaterialGenerateHomeworSyncResp struct {
+    MaterialId int json:"materialId"
+    Vocabularies []VocabularyRequest json:"vocabularies"
+    Homeworks []HomeworkRequest json:"homeworks"
+}
+
+```
+
+## controller/init.go ##
+```
+package controller
+import "github.com/gin-gonic/gin"
+
+
+type MaterialsController interface {
+    CreateHomework(*gin.Context)
+    HomeworkResultByMaterialID(*gin.Context)
+    HomeworkResultByTaskID(*gin.Context)
+    HomeworkResultToCSVByTaskID(*gin.Context)
+    GenerateHomework(*gin.Context)
+}
+
+type materialsController struct{}
+func NewMaterialsController() MaterialsController {
+    return &materialsController{}
+}
+
+```
+
+
+## controller/materials.go ##
+```
+
+package controller
+
+
+import (
+    "Pairotto/Pairotto/app"
+    "Pairotto/Pairotto/controller_model"
+    "Pairotto/Pairotto/dao/repository"
+    service "Pairotto/Pairotto/service/materials"
+    "Pairotto/Pairotto/sutil"
+    "errors"
+    "github.com/gin-gonic/gin"
+    "net/http"
+    "scm.tutorabc.com/tgo-framework/go-log"
+)
+
+
+func (c *materialsController) CreateHomework(ctx *gin.Context) {
+    // Implementation for handling Create Homework
+    context := ctx.Request.Context()
+    appG := app.Gin{C: ctx}
+    lb := sutil.NewLogBuild(context, "CreateHomework")
+    defer func() {
+        if lb.IsError() {
+            log.Error(lb)
+            return
+        }
+        log.Info(lb)
+    }()
+
+
+    var req controller_model.MaterialCreateHomeworkReq
+    if err := ctx.ShouldBindJSON(&req); err != nil {
+        appG.ResponseCasual(http.StatusBadRequest, app.ERROR, gin.H{"error": err.Error()})
+        lb.SetError(err)
+        return
+    }
+
+
+    // 先查詢資料庫判斷 material 是否存在
+    existMaterials, notExistMaterials, err := service.CheckMaterialsExist(req.MaterialIDs)
+    if err != nil {
+        lb.SetError(err)
+        appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+        return
+    }
+    // taskID
+    taskID := sutil.NewUUID()
+
+
+    // 不存在的 material 放進 AddCreateHomeworkTask
+    if len(notExistMaterials) > 0 {
+        err := service.AddCreateHomeworkTask(notExistMaterials, req.CreateTxt, taskID)
+        if err != nil {
+            lb.SetError(err)
+            appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+            return
+        }
+    }
+
+
+    // 回傳 resp，標示哪些已存在、哪些新建
+    resp := controller_model.MaterialCreateHomeworkResp{
+        ProcessingMaterials:     notExistMaterials,
+        AlreadyExistedMaterials: existMaterials,
+        State: func() repository.TestState {
+            if len(notExistMaterials) == 0 {
+                return repository.TestStateCompleted
+            }
+            return repository.TestStateInProgress
+        }(),
+        TaskID: taskID,
+    }
+
+
+    appG.ResponseCasual(http.StatusOK, app.SUCCESS, resp)
+}
+
+
+func (c *materialsController) GenerateHomework(ctx *gin.Context) {
+    // Implementation for handling Create Homework
+    context := ctx.Request.Context()
+    appG := app.Gin{C: ctx}
+    lb := sutil.NewLogBuild(context, "GenerateHomework")
+    defer func() {
+        if lb.IsError() {
+            log.Error(lb)
+            return
+        }
+        log.Info(lb)
+    }()
+
+    // 1. Parse request
+    var req controller_model.MaterialGenerateHomeworkReq
+    if err := ctx.ShouldBindJSON(&req); err != nil {
+        appG.ResponseCasual(http.StatusBadRequest, app.ERROR, gin.H{"error": err.Error()})
+        lb.SetError(err)
+        return
+    }
+
+    // 2. Validate ImageUrls not empty
+    if len(req.ImageUrls) == 0 {
+        err := errors.New("imageUrls cannot be empty")
+        appG.ResponseErrCasual(http.StatusBadRequest, app.ParamBad, err)
+        lb.SetError(err)
+        return
+    }
+
+    materialID := req.MaterialId
+    materialIDs := []int{materialID} // wrap for CheckMaterialsExist
+
+
+    // 3. Check if material exists and is in completed state
+    existMaterials, notExistMaterials, err := service.CheckMaterialsExist(materialIDs)
+    if err != nil {
+        lb.SetError(err)
+        appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+        return
+    }
+
+    taskID := sutil.NewUUID()
+    needsProcessing := len(notExistMaterials) > 0
+
+    // === ASYNC MODE (CallbackURL provided) ===
+
+    if req.CallbackURL != "" {
+        if needsProcessing {
+            // Enqueue async task with callback
+            if err := service.AddGenerateHomeworkTask(materialID, req.ImageUrls, taskID, req.CallbackURL); err != nil {
+                lb.SetError(err)
+                appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+                return
+            }        
+
+        }
+
+        resp := controller_model.MaterialGenerateHomeworkAsyncResp{
+            MaterialID: materialID,
+            TaskID:     taskID,
+            Status:     "accepted",
+            Message:    "Task accepted and processing",
+        }
+        appG.ResponseCasual(http.StatusAccepted, app.SUCCESS, resp)
+        return
+    }
+
+    // === SYNC MODE (no CallbackURL) ===
+    var result interface{}
+
+    if needsProcessing {
+        // Generate homework synchronously using image URLs
+        result, err = service.GenerateHomeworkSync(context, materialID, req.ImageUrls, taskID)
+        if err != nil {
+            lb.SetError(err)
+            appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+            return
+        }
+    } else {
+        // Material already completed — fetch existing result
+        result, err = service.GetExistingHomeworkResult(context, materialID)
+        if err != nil {
+            lb.SetError(err)
+            appG.ResponseErrCasual(http.StatusInternalServerError, app.ERROR, err)
+            return
+        }
+    }
+
+    appG.ResponseCasual(http.StatusOK, app.SUCCESS, result)
+}
+```
+
+ ### dao/repo ### (not changed)
+
+ ```
+ package repository
+ import (
+    "Pairotto/Pairotto/dao/mongodb"
+    "context"
+    "fmt"
+    "strconv"
+
+
+    "go.mongodb.org/mongo-driver/bson"
+)
+
+const MaterialHWCollectionName = "materials_homework_data"
+
+type MaterialsHomeworkRepository struct {
+    *mongodb.BaseRepository
+}
+
+
+func GenerateHomeworkDataKey() string {
+    return fmt.Sprintf("%s_%s", AppName, MaterialHWCollectionName)
+
+}
+
+func NewMaterialsHomeworkRepository() *MaterialsHomeworkRepository {
+    return &MaterialsHomeworkRepository{
+        BaseRepository: mongodb.NewBaseRepository(GenerateHomeworkDataKey()),
+    }
+}
+
+// ====== Structs ======
+type HomeworkData struct {
+    TaskID       string               `json:"task_id" bson:"task_id"`
+    MaterialID   int                  `json:"material_id" bson:"material_id"`
+    State        TestState            `json:"state" bson:"state"` // "failed" | "processing" | "completed"
+    Message      string               `json:"message,omitempty" bson:"message,omitempty"`
+    InterestTags []string             `json:"interest_tags" bson:"interest_tags"`
+    Audience     string               `json:"audience" bson:"audience"`
+    AgeGroups    []int                `json:"age_groups" bson:"age_groups"`
+    IndustryTags []string             `json:"industry_tags" bson:"industry_tags"`
+    CefrLevel    string               `json:"cefr_level" bson:"cefr_level"`
+    Vocabulary   []HomeworkVocabulary `json:"vocabulary" bson:"vocabulary"`
+    Questions    []HomeworkQuestion   `json:"questions" bson:"questions"`
+    TxtLink      string               `json:"txt_link" bson:"txt_link"`
+}
+
+
+type HomeworkVocabulary struct {
+    Word       string `json:"word" bson:"word"`
+    Definition string `json:"definition" bson:"definition"`
+}
+
+
+type HomeworkQuestion struct {
+    Question      string   `json:"question" bson:"question"`
+    Options       []string `json:"options" bson:"options"`
+    CorrectAnswer string   `json:"correct_answer" bson:"correct_answer"`
+    CorrectIndex  int      `json:"correct_index" bson:"correct_index"`
+}
+
+
+func (r *MaterialsHomeworkRepository) GetHomeWorkData(ctx context.Context, materialID string) (*HomeworkData, error) {
+    mid, err := strconv.Atoi(materialID)
+    if err != nil {
+        return nil, err
+    }
+    filter := bson.M{"material_id": mid}
+    var result HomeworkData
+    err = r.FindOne(ctx, filter, &result)
+    if err != nil {
+        return nil, err
+    }
+    return &result, nil
+}
+ ```
+
+### service / init.go ###
+```
+package service
+
+
+func GetMaterialsHWStructuredOutputSetting() map[string]interface{} {
+    return map[string]interface{}{
+        "type": "object",
+        "properties": map[string]interface{}{
+            "material_id": map[string]interface{}{
+                "type": "number",
+            },
+            "interest_tags": map[string]interface{}{
+                "type":        "array",
+                "items":       map[string]interface{}{"type": "string"},
+                "description": "Relevant interest tags from the predefined list",
+            },
+            "audience": map[string]interface{}{
+                "type":        "string",
+                "enum":        []interface{}{"Adult", "Junior"},
+                "description": "Target audience type",
+            },
+            "age_groups": map[string]interface{}{
+                "type":        "array",
+                "items":       map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 5},
+                "description": "Age groups for Junior audience (1-5)",
+            },
+            "industry_tags": map[string]interface{}{
+                "type":        "array",
+                "items":       map[string]interface{}{"type": "string"},
+                "description": "Industry tags for Adult audience",
+            },
+            "cefr_level": map[string]interface{}{
+                "type":        "string",
+                "enum":        []interface{}{"Pre A1", "A1", "A2", "B1", "B2", "C1", "C2"},
+                "description": "CEFR level assessment",
+            },
+            "vocabulary": map[string]interface{}{
+                "type": "array",
+                "items": map[string]interface{}{
+                    "type":                 "object",
+                    "properties":           map[string]interface{}{"word": map[string]interface{}{"type": "string"}, "definition": map[string]interface{}{"type": "string"}},
+                    "required":             []string{"word", "definition"},
+                    "additionalProperties": false,
+                },
+                "minItems":    5,
+                "maxItems":    5,
+                "description": "Five vocabulary words with definitions",
+            },
+            "questions": map[string]interface{}{
+                "type": "array",
+                "items": map[string]interface{}{
+                    "type": "object",
+                    "properties": map[string]interface{}{
+                        "question":       map[string]interface{}{"type": "string"},
+                        "options":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "minItems": 4, "maxItems": 4},
+                        "correct_answer": map[string]interface{}{"type": "string"},
+                        "correct_index":  map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 3},
+                    },
+                    "required":             []string{"question", "options", "correct_answer", "correct_index"},
+                    "additionalProperties": false,
+                },
+                "minItems":    5,
+                "maxItems":    5,
+                "description": "Five multiple-choice questions",
+            },
+        },
+        "required":             []string{"material_id", "interest_tags", "audience", "industry_tags", "vocabulary", "questions"},
+        "additionalProperties": false,
+    }
+}
+```
+
+
+service/createHomework.go
+```
+package service
+
+import (
+    "Pairotto/Pairotto/client"
+    "Pairotto/Pairotto/service"
+    "encoding/csv"
+    "os"
+    "sort"
+    "strconv"
+
+
+    "Pairotto/Pairotto/dao/repository"
+    "Pairotto/Pairotto/sutil"
+    "Pairotto/conf"
+    "context"
+    "encoding/json"
+    "fmt"
+    "strings"
+    "time"
+
+
+    "github.com/openai/openai-go"
+    "go.mongodb.org/mongo-driver/bson"
+    "scm.tutorabc.com/tgo-framework/go-log"
+)
+
+type GenerateHomeworkTask struct {
+    MaterialID  int
+    ImageUrls   []string
+    TaskID      string
+    CallbackURL string
+}
+var GenerateHomeworkTaskChan = make(chan GenerateHomeworkTask, 1024)
+
+func DoGenerateHomeworkTask() {
+    limiter := make(chan struct{}, MaxConcurrentMaterials)
+    log.Infof("DoGenerateHomeworkTask started")
+
+    for task := range GenerateHomeworkTaskChan {
+        limiter <- struct{}{}
+        go func(t GenerateHomeworkTask) {
+            defer func() { <-limiter }()
+            defer func() {
+                if r := recover(); r != nil {
+                    log.Errorf("Panic in async homework task %d: %v", t.MaterialID, r)
+                    _ = saveHomeworkFail(context.Background(), t.MaterialID, t.TaskID, fmt.Errorf("panic: %v", r))
+                }
+            }()
+
+            ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+            defer cancel()
+
+            // Get brand
+            detail, err := GetMaterialDetail(t.MaterialID)
+            if err != nil {
+                _ = saveHomeworkFail(ctx, t.MaterialID, t.TaskID, err)
+                return
+            }
+
+            // Generate
+            result, err := createHomeworkWithRetryFromUrls(t.MaterialID, detail.Data.BrandIds, t.ImageUrls)
+            if err != nil {
+                _ = saveHomeworkFail(ctx, t.MaterialID, t.TaskID, err)
+                return
+            }
+
+            // ✅ ONLY if callbackURL exists: send to it
+            if t.CallbackURL != "" {
+                gtrReq := prepareGTRRequest(t.MaterialID, result)
+                if err := sendBatchInsertCallback(t.CallbackURL, &gtrReq); err != nil {
+                    _ = saveHomeworkFail(ctx, t.MaterialID, t.TaskID, err)
+                    log.Errorf("Callback failed for task %s: %v", t.TaskID, err)
+                    return
+                }
+            }
+
+            // Save success
+            result.MaterialID = t.MaterialID
+            result.TaskID = t.TaskID
+            result.CallbackURL = t.CallbackURL
+            result.State = repository.TestStateCompleted
+
+            repo := repository.NewMaterialsHomeworkRepository()
+            _ = repo.Upsert(ctx, bson.M{"material_id": t.MaterialID}, result)
+
+            log.Infof("Async homework completed for material %d", t.MaterialID)
+        }(task)
+    }
+}
+
+
+func AddGenerateHomeworkTask(materialID int, imageUrls []string, taskID, callbackURL string) error {
+    if len(imageUrls) == 0 {
+        return fmt.Errorf("imageUrls must not be empty")
+    }
+
+    repo := repository.NewMaterialsHomeworkRepository()
+    ctx := context.Background()
+
+    // Save in-progress state
+    homeworkData := &repository.HomeworkData{
+        MaterialID:  materialID,
+        State:       repository.TestStateInProgress,
+        TaskID:      taskID,
+        CallbackURL: callbackURL,
+    }
+    if err := repo.Upsert(ctx, bson.M{"material_id": materialID}, homeworkData); err != nil {
+        return fmt.Errorf("failed to initialize task: %w", err)
+    }
+
+    GenerateHomeworkTaskChan <- GenerateHomeworkTask{
+        MaterialID:  materialID,
+        ImageUrls:   imageUrls,
+        TaskID:      taskID,
+        CallbackURL: callbackURL,
+    }
+    return nil
+}
+
+
+func GenerateHomeworkSync(ctx context.Context, materialID int, imageUrls []string, taskID string) (*repository.HomeworkData, error) {
+    if len(imageUrls) == 0 {
+        return nil, fmt.Errorf("imageUrls must not be empty")
+    }
+
+    repo := repository.NewMaterialsHomeworkRepository()
+
+    // Set in-progress
+    if err := repo.Upsert(ctx, bson.M{"material_id": materialID}, &repository.HomeworkData{
+        MaterialID: materialID,
+        State:      repository.TestStateInProgress,
+        TaskID:     taskID,
+    }); err != nil {
+        return nil, fmt.Errorf("failed to set in-progress state: %w", err)
+    }
+
+    // Get brand
+    detail, err := GetMaterialDetail(materialID)
+    if err != nil {
+        _ = saveHomeworkFail(ctx, materialID, taskID, err)
+        return nil, err
+    }
+
+    // Generate using image URLs
+    result, err := createHomeworkWithRetryFromUrls(materialID, detail.Data.BrandIds, imageUrls)
+    if err != nil {
+        _ = saveHomeworkFail(ctx, materialID, taskID, err)
+        return nil, err
+    }
+
+    // ✅ NO CALLBACK, NO UPLOAD — just return result
+
+    // Save completed state (for future reuse)
+    result.MaterialID = materialID
+    result.TaskID = taskID
+    result.State = repository.TestStateCompleted
+
+    if err := repo.Upsert(ctx, bson.M{"material_id": materialID}, result); err != nil {
+        log.Warnf("Failed to cache completed homework: %v", err)
+    }
+
+    return result, nil
+}
+
+// GetExistingHomeworkResult - for future CheckMaterialsExist reuse
+func GetExistingHomeworkResult(ctx context.Context, materialID int) (*repository.HomeworkData, error) {
+    repo := repository.NewMaterialsHomeworkRepository()
+    data, err := repo.GetHomeWorkData(ctx, strconv.Itoa(materialID))
+    if err != nil {
+        return nil, err
+    }
+    if data.State != repository.TestStateCompleted {
+        return nil, fmt.Errorf("homework not completed")
+    }
+    return data, nil
+}
+
+
+###################
+
+
+func sendBatchInsertCallback(callbackURL string, req *client.BatchInsertRequest) error {
+    jsonData, err := json.Marshal(req)
+    if err != nil {
+        return fmt.Errorf("marshal callback payload: %w", err)
+    }
+
+    httpReq, err := http.NewRequest(http.MethodPost, callbackURL, bytes.NewBuffer(jsonData))
+    if err != nil {
+        return fmt.Errorf("create request: %w", err)
+    }
+    httpReq.Header.Set("Content-Type", "application/json")
+
+    client := &http.Client{Timeout: 10 * time.Second}
+    resp, err := client.Do(httpReq)
+    if err != nil {
+        return fmt.Errorf("send callback: %w", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+        return fmt.Errorf("callback HTTP %d: %s", resp.StatusCode, string(body))
+    }
+
+    // Optional: check success field
+    var callbackResp client.BatchInsertResponse
+    if err := json.NewDecoder(resp.Body).Decode(&callbackResp); err != nil {
+        return nil // assume success if 2xx
+    }
+    if !callbackResp.Success {
+        return fmt.Errorf("callback API error: %s (code: %d)", callbackResp.Message, callbackResp.Code)
+    }
+
+    return nil
+}
+
+func createHomeworkWithRetryFromUrls(materialId int, brandIdStr string, urls []string) (*repository.HomeworkData, error) {
+    domains := []string{
+        "dmaterials.tutormeet.com",
+        "s3.tutorabc.com",
+        "storage.tutorabc.com",
+    }
+
+    original := make([]string, len(urls))
+    copy(original, urls)
+
+    var lastErr error
+    for _, domain := range domains {
+        current := make([]string, len(original))
+        for i, u := range original {
+            temp := u
+            for _, d := range domains {
+                temp = strings.ReplaceAll(temp, d, domain)
+            }
+            current[i] = temp
+        }
+
+        result, err := CreateHomeworkWithPngUrls(materialId, brandIdStr, current)
+        if err == nil {
+            return result, nil
+        }
+        lastErr = err
+        log.Warnf("Domain %s failed: %v", domain, err)
+    }
+    return nil,
+
+
+```
+
